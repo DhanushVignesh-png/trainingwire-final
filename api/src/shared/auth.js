@@ -124,10 +124,25 @@ function getSession(request) {
   return body;
 }
 
-// Reg-token guard (only valid for the MPIN set/login step). Returns { sub } or null.
 function getRegSession(request) {
   const tok = _bearer(request);
-  if (!tok) return null;
+  if (!tok) { console.log('REGDBG: no bearer token on request'); return null; }
+
+  // Manual, no-throw diagnostic
+  try {
+    const parts = String(tok).split('.');
+    console.log('REGDBG: parts=' + parts.length + ' secretSet=' + (!!ENV.JWT_SECRET) + ' secretLen=' + (ENV.JWT_SECRET ? ENV.JWT_SECRET.length : 0));
+    const [head, data, sig] = parts;
+    const expected = crypto.createHmac('sha256', ENV.JWT_SECRET)
+      .update(head + '.' + data).digest('base64')
+      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    console.log('REGDBG: sigMatch=' + (sig === expected));
+    const bodyDbg = JSON.parse(fromB64url(data));
+    console.log('REGDBG: typ=' + bodyDbg.typ + ' exp=' + bodyDbg.exp + ' now=' + Date.now() + ' expired=' + (Date.now() > bodyDbg.exp));
+  } catch (e) {
+    console.log('REGDBG: threw ' + e.message);
+  }
+
   const body = verifyToken(tok);
   if (!body || body.typ !== 'reg') return null;
   return body;
