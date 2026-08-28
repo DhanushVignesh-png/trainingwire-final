@@ -3,16 +3,17 @@
 // Single source of truth for talking to the backend. Owns the session token,
 // attaches auth headers, enforces timeouts, and normalises all errors so the UI
 // never has to think about fetch plumbing.
+//
+// NOTE: We send the bearer token in a CUSTOM header (X-Authorization), NOT the
+// standard Authorization header. Azure Static Web Apps' managed Functions host
+// runs "Easy Auth" that strips/overwrites the standard Authorization header
+// before it reaches the function. X-Authorization passes through untouched.
 'use strict';
 
 const API_BASE = '/api';
 const REQUEST_TIMEOUT_MS = 30000;
 
 // ── Token storage ─────────────────────────────────────────────────────────
-// The reg-token (short-lived, from OTP verify) and the session token (post-MPIN)
-// are kept in memory only. We mirror the session token into sessionStorage so a
-// tab refresh doesn't force a full re-login, but it never touches localStorage
-// (survives tab close = larger attack window). Cleared on logout.
 const SESSION_KEY = 'tw_session';
 const REG_KEY = 'tw_reg';
 
@@ -51,11 +52,11 @@ async function request(path, { method = 'GET', body = null, auth = 'session' } =
   const headers = { 'Accept': 'application/json' };
   if (body !== null) headers['Content-Type'] = 'application/json';
 
-  // Pick which token to send.
+  // Pick which token to send. Use X-Authorization (see file header note).
   if (auth === 'session' && _sessionToken) {
-    headers['Authorization'] = 'Bearer ' + _sessionToken;
+    headers['X-Authorization'] = 'Bearer ' + _sessionToken;
   } else if (auth === 'reg' && _regToken) {
-    headers['Authorization'] = 'Bearer ' + _regToken;
+    headers['X-Authorization'] = 'Bearer ' + _regToken;
   }
 
   let resp;
@@ -119,7 +120,6 @@ async function loginMpin(mpin) {
 
 // ── Realtime ──────────────────────────────────────────────────────────────
 async function negotiate() {
-  // Returns { url, group } — url is a signed Web PubSub client access URL.
   return request('/negotiate', { method: 'GET', auth: 'session' });
 }
 
@@ -129,7 +129,6 @@ async function fetchArticle(url) {
 }
 
 async function injectReleases(items) {
-  // items: [{ url, headline? }]
   return request('/inject', { method: 'POST', body: { items }, auth: 'session' });
 }
 
@@ -154,12 +153,8 @@ async function getState() {
 // ── Public surface ────────────────────────────────────────────────────────
 window.WireClient = {
   ApiError,
-  // token state
   hasSession, getSessionToken, getRegToken, clearTokens,
-  // auth
   requestOtp, verifyOtp, setMpin, loginMpin,
-  // realtime
   negotiate,
-  // wire ops
   fetchArticle, injectReleases, publishAlert, flagAlert, clearWire, getState,
 };
