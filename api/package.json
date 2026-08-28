@@ -1,0 +1,16 @@
+{
+  "name": "training-wire-api",
+  "version": "1.0.0",
+  "description": "Training Wire — Azure Functions backend (auth, fetch-proxy, live wire).",
+  "main": "src/functions/*.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "func start"
+  },
+  "dependencies": {
+    "@azure/functions": "^4.5.0",
+    "@azure/data-tables": "^13.3.0",
+    "@azure/web-pubsub": "^1.1.3",
+    "@azure/communication-email": "^1.0.0"
+  }
+}

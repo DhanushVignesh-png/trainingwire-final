@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="referrer" content="no-referrer" />
+  <meta name="color-scheme" content="dark" />
+  <title>Training Wire</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="stylesheet" href="terminal.css" />
+</head>
+<body>
+  <!-- Auth gate mounts here -->
+  <div id="auth-root" class="auth-root" aria-live="polite"></div>
+
+  <!-- Main terminal shell (hidden until authed) -->
+  <div id="app-root" class="app-root" hidden>
+    <!-- Top bar -->
+    <header class="topbar">
+      <div class="topbar-left">
+        <span class="brand-mark">◆</span>
+        <span class="brand-text">TRAINING&nbsp;WIRE</span>
+        <span class="env-tag">SIMULATION</span>
+      </div>
+      <div class="topbar-right">
+        <span id="conn-status" class="conn-status conn-offline" title="Realtime status">
+          <span class="conn-dot"></span><span class="conn-label">connecting…</span>
+        </span>
+        <span id="user-chip" class="user-chip"></span>
+        <button id="btn-logout" class="btn-ghost btn-sm" type="button">Sign out</button>
+      </div>
+    </header>
+
+    <!-- Body: 3-column terminal layout -->
+    <main class="workspace">
+      <!-- LEFT: Inject / staging panel -->
+      <aside class="panel panel-left" id="panel-inject">
+        <div class="panel-head">
+          <h2 class="panel-title">Inject Releases</h2>
+          <span class="panel-hint">Stage source URLs, push live</span>
+        </div>
+        <div class="panel-body">
+          <div class="field">
+            <label class="field-label" for="inject-url">Source URL</label>
+            <div class="field-row">
+              <input class="input" id="inject-url" type="url" placeholder="https://…" spellcheck="false" />
+              <button class="btn-accent btn-sm" id="btn-stage" type="button">Stage</button>
+            </div>
+            <div class="field-note" id="inject-note"></div>
+          </div>
+          <div class="staged" id="staged-list" aria-label="Staged releases"></div>
+          <button class="btn-primary btn-block" id="btn-inject" type="button" disabled>
+            Push staged to wire
+          </button>
+        </div>
+      </aside>
+
+      <!-- CENTER: Live wire feed -->
+      <section class="panel panel-center" id="panel-wire">
+        <div class="panel-head">
+          <h2 class="panel-title">Live Wire</h2>
+          <div class="panel-actions">
+            <button class="btn-ghost btn-sm" id="btn-refresh" type="button" title="Resync">↻</button>
+            <button class="btn-danger btn-sm" id="btn-clear" type="button" title="Global reset">Reset wire</button>
+          </div>
+        </div>
+        <div class="panel-body wire-feed" id="wire-feed" aria-live="polite">
+          <div class="empty-state" id="wire-empty">
+            <div class="empty-mark">◇</div>
+            <p>No releases yet. Stage a source on the left and push it live.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- RIGHT: Reader + publish -->
+      <aside class="panel panel-right" id="panel-reader">
+        <div class="panel-head">
+          <h2 class="panel-title">Reader</h2>
+          <span class="panel-hint" id="reader-hint">Select a release</span>
+        </div>
+        <div class="panel-body">
+          <div class="reader-view" id="reader-view">
+            <div class="empty-state">
+              <div class="empty-mark">◎</div>
+              <p>Open a release from the wire to read it and publish an alert.</p>
+            </div>
+          </div>
+        </div>
+        <div class="publish-dock" id="publish-dock" hidden>
+          <div class="field">
+            <label class="field-label" for="pub-chain">Chain</label>
+            <input class="input" id="pub-chain" type="text" placeholder="e.g. GOLD, USD, OIL" spellcheck="false" />
+          </div>
+          <div class="field">
+            <label class="field-label" for="pub-alert">Alert headline</label>
+            <textarea class="input textarea" id="pub-alert" rows="2" maxlength="240"
+                      placeholder="Type the market-moving alert…"></textarea>
+            <div class="field-note"><span id="pub-count">0</span>/240</div>
+          </div>
+          <button class="btn-primary btn-block" id="btn-publish" type="button">Publish alert</button>
+        </div>
+      </aside>
+    </main>
+
+    <!-- Publish history strip -->
+    <footer class="ticker" id="ticker">
+      <div class="ticker-head">HISTORY</div>
+      <div class="ticker-body" id="ticker-body"></div>
+    </footer>
+  </div>
+
+  <!-- Confirm modal (clear/global reset) -->
+  <div id="modal-root" class="modal-root" hidden>
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <h3 id="modal-title" class="modal-title">Reset the wire for everyone?</h3>
+      <p class="modal-body">
+        This permanently clears <b>all releases, all published alerts, and all flags</b>
+        for <b>every connected terminal</b>. It cannot be undone.
+      </p>
+      <div class="field">
+        <label class="field-label" for="confirm-text">Type <b>RESET</b> to confirm</label>
+        <input class="input" id="confirm-text" type="text" autocomplete="off" spellcheck="false" placeholder="RESET" />
+      </div>
+      <div class="modal-actions">
+        <button class="btn-ghost" id="modal-cancel" type="button">Cancel</button>
+        <button class="btn-danger" id="modal-confirm" type="button" disabled>Reset everything</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast host -->
+  <div id="toast-host" class="toast-host" aria-live="assertive"></div>
+
+  <!-- Scripts: order matters (no modules; CSP script-src 'self') -->
+  <script src="wire-client.js"></script>
+  <script src="release-formatter.js"></script>
+  <script src="wire-realtime.js"></script>
+  <script src="auth.js"></script>
+  <script src="terminal.js"></script>
+</body>
+</html>
