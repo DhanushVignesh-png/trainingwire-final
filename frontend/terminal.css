@@ -32,6 +32,13 @@
 
 * { box-sizing: border-box; }
 html, body { height: 100%; }
+
+/* ── CRITICAL: the [hidden] attribute must always win over class display rules.
+   Without this, elements like #modal-root (.modal-root{display:grid}),
+   #publish-dock, and #wire-empty ignore their `hidden` attribute and show on
+   load. This single rule fixes the reset modal appearing at startup. ── */
+[hidden] { display: none !important; }
+
 body {
   margin: 0;
   background:
