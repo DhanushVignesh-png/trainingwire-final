@@ -3,6 +3,11 @@
 // JWT signing/verification (no external lib — uses Node's built-in crypto),
 // PBKDF2 MPIN hashing, OTP generation + verification, and the request-auth
 // helpers every protected function uses to reject anyone without a valid token.
+//
+// IMPORTANT: We read the bearer token from X-Authorization first. Azure Static
+// Web Apps' managed Functions host strips/overwrites the standard Authorization
+// header, so the frontend sends X-Authorization. We still fall back to the
+// standard header for local dev / direct calls.
 'use strict';
 
 const crypto = require('crypto');
@@ -104,14 +109,27 @@ function issueRegToken(email) {
 }
 
 // ── Header token extraction ──
-function _bearer(request) {
-  let authHeader = '';
+// Read from X-Authorization FIRST (SWA-safe), then fall back to the standard
+// Authorization header for local dev / direct Function calls.
+function _readHeader(request, name) {
   try {
-    authHeader = request.headers.get
-      ? (request.headers.get('authorization') || '')
-      : (request.headers.authorization || '');
-  } catch (e) { authHeader = ''; }
-  const m = /^Bearer\s+(.+)$/i.exec(String(authHeader).trim());
+    if (request.headers && typeof request.headers.get === 'function') {
+      return request.headers.get(name) || '';
+    }
+    if (request.headers) {
+      // Node object headers are lower-cased.
+      return request.headers[name] || request.headers[name.toLowerCase()] || '';
+    }
+  } catch (e) { /* fall through */ }
+  return '';
+}
+
+function _bearer(request) {
+  const raw =
+    _readHeader(request, 'x-authorization') ||
+    _readHeader(request, 'authorization') ||
+    '';
+  const m = /^Bearer\s+(.+)$/i.exec(String(raw).trim());
   return m ? m[1] : null;
 }
 
@@ -124,25 +142,10 @@ function getSession(request) {
   return body;
 }
 
+// Reg-token guard (only valid for the MPIN set/login step). Returns { sub } or null.
 function getRegSession(request) {
   const tok = _bearer(request);
-  if (!tok) { console.log('REGDBG: no bearer token on request'); return null; }
-
-  // Manual, no-throw diagnostic
-  try {
-    const parts = String(tok).split('.');
-    console.log('REGDBG: parts=' + parts.length + ' secretSet=' + (!!ENV.JWT_SECRET) + ' secretLen=' + (ENV.JWT_SECRET ? ENV.JWT_SECRET.length : 0));
-    const [head, data, sig] = parts;
-    const expected = crypto.createHmac('sha256', ENV.JWT_SECRET)
-      .update(head + '.' + data).digest('base64')
-      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-    console.log('REGDBG: sigMatch=' + (sig === expected));
-    const bodyDbg = JSON.parse(fromB64url(data));
-    console.log('REGDBG: typ=' + bodyDbg.typ + ' exp=' + bodyDbg.exp + ' now=' + Date.now() + ' expired=' + (Date.now() > bodyDbg.exp));
-  } catch (e) {
-    console.log('REGDBG: threw ' + e.message);
-  }
-
+  if (!tok) return null;
   const body = verifyToken(tok);
   if (!body || body.typ !== 'reg') return null;
   return body;
