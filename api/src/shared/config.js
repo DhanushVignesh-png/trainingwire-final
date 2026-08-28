@@ -7,13 +7,28 @@
 // ── Environment variables (set in Static Web App → Configuration) ──
 // None of these are hard-coded. If one is missing at runtime, the relevant
 // function fails loudly rather than silently doing something insecure.
+//
+// NOTE: each var accepts either the conventional code name OR the alternate
+// name that was set in the Azure portal, so a naming mismatch can't break boot.
+// Whichever is present (non-empty) wins. Set only ONE per line in Azure.
 const ENV = {
-  TABLES_CONNECTION: process.env.TABLES_CONNECTION || '',   // Storage account connection string
-  WPS_CONNECTION:    process.env.WPS_CONNECTION    || '',   // Web PubSub connection string
-  WPS_HUB:           process.env.WPS_HUB           || 'wire', // Hub name (single shared wire)
-  ACS_CONNECTION:    process.env.ACS_CONNECTION    || '',   // Communication Services connection string
-  ACS_SENDER:        process.env.ACS_SENDER        || '',   // e.g. DoNotReply@xxxx.azurecomm.net
-  JWT_SECRET:        process.env.JWT_SECRET        || '',   // random 48-byte secret you generate
+  // Storage account connection string
+  TABLES_CONNECTION: process.env.TABLES_CONNECTION || '',
+
+  // Web PubSub connection string — accepts WPS_CONNECTION or WEBPUBSUB_CONNECTION
+  WPS_CONNECTION:    process.env.WPS_CONNECTION || process.env.WEBPUBSUB_CONNECTION || '',
+
+  // Hub name (single shared wire)
+  WPS_HUB:           process.env.WPS_HUB || 'wire',
+
+  // Communication Services connection string — accepts ACS_CONNECTION or COMMS_CONNECTION
+  ACS_CONNECTION:    process.env.ACS_CONNECTION || process.env.COMMS_CONNECTION || '',
+
+  // Sender address, e.g. DoNotReply@xxxx.azurecomm.net — accepts ACS_SENDER or SENDER_EMAIL
+  ACS_SENDER:        process.env.ACS_SENDER || process.env.SENDER_EMAIL || '',
+
+  // Random 48-byte secret you generate
+  JWT_SECRET:        process.env.JWT_SECRET || '',
 };
 
 // ── Security policy ──
