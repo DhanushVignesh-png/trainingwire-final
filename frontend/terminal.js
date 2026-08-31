@@ -6,6 +6,14 @@
 // with X-flag toggling (synced to everyone), Clear (global reset), PDF export,
 // draggable+resizable Settings with Send Releases (client fetches + formats, then
 // posts finished bodies to /api/inject). Realtime keeps every terminal in sync.
+//
+// ── PERFORMANCE (free tier, 20 concurrent trainees) ──
+// A 'release' event carries METADATA ONLY. We insert that instantly for a snappy
+// blotter and DO NOT pull the whole wire. The full body is lazy-loaded via
+// /api/release the first time a user opens that release, then cached in memory.
+// This replaces the old hydrate()-on-every-event behaviour, which re-downloaded
+// the entire snapshot (all bodies) per event — a bandwidth storm at 20 users.
+// hydrate() now runs only on login and on reconnect (one authoritative pull).
 'use strict';
 
 (function () {
@@ -22,6 +30,10 @@
   let highlightKeywords = [];
   const MAX_RELEASES = 15;
   let stagedReleases = [];   // { url, headline }
+
+  // Tracks release ids whose full body is currently being lazy-fetched, so we
+  // never fire two concurrent /api/release calls for the same release.
+  const bodyFetching = {};
 
   // Friendly incrementing display id (#1, #2…) mapped to each UUID (1.6 look).
   const displayIdMap = {};
@@ -67,6 +79,8 @@
   }
 
   // ═══ SNAPSHOT (initial + every reconnect) ═══
+  // This is the ONE authoritative full pull. It brings every release body. We run
+  // it on login and on reconnect only — never per realtime event.
   async function hydrate(){
     try{
       const snap = await window.WireClient.getState();
@@ -92,7 +106,7 @@
   function startRealtime(){
     const rt = window.WireRealtime;
     rt.onStatus(setConnStatus);
-    rt.onResync(()=>{ hydrate(); });
+    rt.onResync(()=>{ hydrate(); });   // reconnect → single authoritative pull
     rt.on('release',(p)=>{ upsertReleaseMeta(p); renderBlotter(); toast('New release on the wire','i'); });
     rt.on('publish',(p)=>{ addHistory(p); if(p.chain===state.selectedId) renderPubHistory(); });
     rt.on('flag',(p)=>{ applyFlag(p); if(p.chain===state.selectedId) renderPubHistory(); });
@@ -112,18 +126,56 @@
     else { el.classList.add('conn-connecting'); label.textContent= status==='reconnecting'?'reconnecting…':'connecting…'; }
   }
 
-  // The broadcast payload is LIGHT (no body). Pull the full body via hydrate() so
-  // the reader has bodyHtml. We upsert metadata immediately for a snappy blotter.
+  // A 'release' broadcast is LIGHT (metadata only, no body). Insert it instantly.
+  // The body is lazy-loaded on first open (loadReleaseBody). We DO NOT call
+  // hydrate() here — that would re-pull the entire wire on every event.
   function upsertReleaseMeta(r){
     if(!r||!r.id) return;
     const i=state.releases.findIndex(x=>x.id===r.id);
-    const meta={ id:r.id, kind:r.kind, headline:r.headline||'', source:r.source||'', sourceUrl:r.sourceUrl||'', injectedBy:r.injectedBy||'', createdAt:r.createdAt||Date.now(), bodyHtml:'', bodyText:'' };
-    if(i===-1) state.releases.unshift(meta);
-    else state.releases[i]={ ...state.releases[i], ...meta, bodyHtml:state.releases[i].bodyHtml, bodyText:state.releases[i].bodyText };
+    const meta={ id:r.id, kind:r.kind, headline:r.headline||'', source:r.source||'', sourceUrl:r.sourceUrl||'', injectedBy:r.injectedBy||'', createdAt:r.createdAt||Date.now() };
+    if(i===-1){
+      state.releases.unshift({ ...meta, bodyHtml:'', bodyText:'' });
+    } else {
+      // Keep any body we already fetched/cached; refresh the metadata only.
+      state.releases[i]={ ...state.releases[i], ...meta };
+    }
     state.releases.sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
-    // Pull full bodies in the background so the reader works when opened.
-    hydrate();
   }
+
+  // Lazy-load a single release body via /api/release, cache it, refresh the reader
+  // if that release is still the one on screen. Guarded against double-fetch.
+  async function loadReleaseBody(id){
+    if(!id || bodyFetching[id]) return;
+    bodyFetching[id]=true;
+    try{
+      const res=await window.WireClient.getRelease(id);
+      const full=res && res.release;
+      if(full){
+        const i=state.releases.findIndex(x=>x.id===id);
+        if(i!==-1){
+          state.releases[i]={ ...state.releases[i],
+            bodyHtml: full.bodyHtml || '',
+            bodyText: full.bodyText || '',
+            contentType: full.contentType || state.releases[i].contentType,
+          };
+        }
+        // Only re-render if the user is still looking at this release.
+        if(state.selectedId===id) renderReader(state.releases[i]);
+      }
+    }catch(err){
+      if(err.status===401){ bounceToLogin(); return; }
+      // Reader already shows a fallback; just note it failed.
+      if(state.selectedId===id){
+        const rb=document.getElementById('readerBody');
+        if(rb && rb.querySelector('.reader-loading')){
+          rb.innerHTML='<div class="reader-placeholder">Could not load this release body. It may have been cleared. Try selecting it again.</div>';
+        }
+      }
+    }finally{
+      delete bodyFetching[id];
+    }
+  }
+
   function addHistory(h){
     if(!h||!h.chain) return;
     if(!state.history[h.chain]) state.history[h.chain]=[];
@@ -295,7 +347,7 @@
       btn.disabled=false; btn.textContent=old;
       renderSendReleases();
       closeSettings();
-      hydrate();
+      // The 'release' broadcasts will populate our own blotter live. No hydrate().
     }
   }
 
@@ -382,6 +434,8 @@
     if(aeSrc) aeSrc.value=((s&&s.source)||'').toUpperCase();
     if(aeBody) aeBody.value='';
     updateAeCharCount();
+    // Lazy-load the body if we only have metadata for this release.
+    if(s && !s.bodyHtml && !s.bodyText) loadReleaseBody(id);
   }
 
   function highlightNode(root){
@@ -430,8 +484,16 @@
     if(s.bodyHtml){
       rb.innerHTML=window.ReleaseFormatter.sanitizeStored(s.bodyHtml);
       try{ highlightNode(rb); }catch(e){}
+    } else if(s.bodyText){
+      rb.innerHTML='<p class="rl-p">'+esc(s.bodyText)+'</p>';
+      try{ highlightNode(rb); }catch(e){}
+    } else if(bodyFetching[s.id]){
+      // Body is on its way — show a tiny loading line, headline already visible.
+      rb.innerHTML='<div class="reader-placeholder reader-loading">Loading release…</div>';
     } else {
-      rb.innerHTML='<p class="rl-p">'+esc(s.bodyText||'(No body text available — reopen after it syncs.)')+'</p>';
+      // No body yet and not fetching: kick a lazy load and show loading.
+      rb.innerHTML='<div class="reader-placeholder reader-loading">Loading release…</div>';
+      loadReleaseBody(s.id);
     }
     rb.style.fontSize=(document.getElementById('zoom').value||13)+'px';
     if(srcTag) srcTag.textContent='Source: '+((s.kind||'html').toUpperCase());
@@ -539,6 +601,7 @@
   function exportReaderPdf(){
     const s=currentStory();
     if(!s){ toast('Select a release first','w'); return; }
+    if(!s.bodyHtml && !s.bodyText){ toast('Release still loading — try again in a moment','w'); if(!bodyFetching[s.id]) loadReleaseBody(s.id); return; }
     let root=document.getElementById('pdfExportRoot');
     if(!root){ root=document.createElement('div'); root.id='pdfExportRoot'; document.body.appendChild(root); }
     const meta=[s.source,'#'+displayId(s.id),hms(s.createdAt),s.sourceUrl].filter(Boolean).map(esc).join(' &nbsp;·&nbsp; ');
