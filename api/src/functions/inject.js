@@ -1,114 +1,33 @@
 // FILE: api/src/functions/inject.js
 // Training Wire — POST /api/inject
-// Takes staged release URLs (+ optional manual headlines), fetches/parses each one
-// server-side via the SAME hardened pipeline as article-fetch, stores them as shared
-// releases, and broadcasts each new release to every terminal via the "wire" group.
-// Full session required. Capped at LIMITS.MAX_STAGED_URLS per call.
+// OPTION A pipeline: the INJECTOR'S BROWSER fetches (via /api/article-fetch) and
+// formats each release with the 1.6 ReleaseFormatter, then posts the FINISHED body
+// here. This endpoint validates, chunks the body across ≤64KB Table properties
+// (fixes "Could not save release"), stores a shared release, and broadcasts it to
+// every terminal via the "wire" group. Full session required.
+//
+// Accepts items shaped as:
+//   { title, bodyHtml, bodyText, kind ('html'|'pdf'), sourceUrl, source? }
+// Anything oversized is rejected per-item with a clear message (never a silent fail).
 'use strict';
 
 const { app } = require('@azure/functions');
 const { WebPubSubServiceClient } = require('@azure/web-pubsub');
 const crypto = require('crypto');
-const dns = require('dns').promises;
-const net = require('net');
 const { ENV, LIMITS, TABLES, WIRE_GROUP, requireEnv } = require('../shared/config');
 const { getSession, json } = require('../shared/auth');
 const tables = require('../shared/tables');
+const { splitBody } = require('../shared/chunk');
 
-// ── SSRF guards (same policy as article-fetch.js) ──
-function isPrivateIp(ip) {
-  if (net.isIPv4(ip)) {
-    const p = ip.split('.').map(Number);
-    if (p[0] === 10) return true;
-    if (p[0] === 127) return true;
-    if (p[0] === 169 && p[1] === 254) return true;
-    if (p[0] === 172 && p[1] >= 16 && p[1] <= 31) return true;
-    if (p[0] === 192 && p[1] === 168) return true;
-    if (p[0] === 100 && p[1] >= 64 && p[1] <= 127) return true;
-    if (p[0] === 0) return true;
-    return false;
-  }
-  const low = ip.toLowerCase();
-  if (low === '::1' || low === '::') return true;
-  if (low.startsWith('fe80') || low.startsWith('fc') || low.startsWith('fd')) return true;
-  if (low.startsWith('::ffff:')) return isPrivateIp(low.replace('::ffff:', ''));
-  return false;
-}
-async function assertPublicHost(hostname) {
-  if (net.isIP(hostname)) {
-    if (isPrivateIp(hostname)) throw new Error('Target address is not permitted.');
-    return;
-  }
-  let records = [];
-  try { records = await dns.lookup(hostname, { all: true }); }
-  catch (e) { throw new Error('Could not resolve host.'); }
-  if (!records.length) throw new Error('Could not resolve host.');
-  for (const r of records) {
-    if (isPrivateIp(r.address)) throw new Error('Target address is not permitted.');
-  }
-}
-async function validateUrl(rawUrl) {
-  let parsed;
-  try { parsed = new URL(rawUrl); }
-  catch (e) { throw new Error('Invalid URL.'); }
-  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-    throw new Error('Only http and https URLs are allowed.');
-  }
-  await assertPublicHost(parsed.hostname);
-  return parsed;
-}
+// Cap sizes so one client can't post an absurd payload. These are generous;
+// the chunker enforces the real ~900KB storage ceiling.
+const MAX_TITLE = 500;
+const MAX_SOURCE = 120;
+const MAX_BODY_CHARS = 1_200_000;   // ~1.2M chars hard input guard
 
-// ── Fetch one URL with manual redirects + per-hop revalidation + caps ──
-async function fetchOne(rawUrl) {
-  let current = await validateUrl(rawUrl);
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), LIMITS.FETCH_TIMEOUT_MS);
-  try {
-    let hops = 0;
-    let resp;
-    while (true) {
-      resp = await fetch(current.toString(), {
-        method: 'GET',
-        redirect: 'manual',
-        signal: controller.signal,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) TrainingWire/1.0',
-          'Accept': 'text/html,application/xhtml+xml,application/pdf,*/*',
-        },
-      });
-      const s = resp.status;
-      const isRedirect = s === 301 || s === 302 || s === 303 || s === 307 || s === 308;
-      const location = resp.headers.get('location');
-      if (isRedirect && location) {
-        hops += 1;
-        if (hops > LIMITS.FETCH_MAX_REDIRECTS) throw new Error('Too many redirects.');
-        current = await validateUrl(new URL(location, current).toString());
-        continue;
-      }
-      break;
-    }
-    if (!resp.ok) throw new Error(`Source responded with ${resp.status}.`);
-
-    const contentType = (resp.headers.get('content-type') || '').toLowerCase();
-    const reader = resp.body.getReader();
-    const chunks = [];
-    let received = 0;
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      received += value.length;
-      if (received > LIMITS.FETCH_MAX_BYTES) { reader.cancel(); throw new Error('File too large.'); }
-      chunks.push(value);
-    }
-    const buffer = Buffer.concat(chunks);
-    const isPdf = contentType.includes('application/pdf') || current.pathname.toLowerCase().endsWith('.pdf');
-    if (isPdf) {
-      return { kind: 'pdf', contentType: 'application/pdf', base64: buffer.toString('base64'), sourceUrl: current.toString() };
-    }
-    return { kind: 'html', contentType: contentType || 'text/html', text: buffer.toString('utf8'), sourceUrl: current.toString() };
-  } finally {
-    clearTimeout(timer);
-  }
+function clampStr(v, max) {
+  const s = String(v == null ? '' : v);
+  return s.length > max ? s.slice(0, max) : s;
 }
 
 app.http('inject', {
@@ -124,14 +43,13 @@ app.http('inject', {
     let body;
     try { body = await request.json(); } catch (e) { return json(400, { error: 'Invalid JSON body.' }); }
 
-    // items: [{ url, headline? }]
     const items = Array.isArray(body && body.items) ? body.items : [];
-    if (!items.length) return json(400, { error: 'At least one release URL is required.' });
+    if (!items.length) return json(400, { error: 'At least one release is required.' });
     if (items.length > LIMITS.MAX_STAGED_URLS) {
       return json(400, { error: `You can inject at most ${LIMITS.MAX_STAGED_URLS} releases at once.` });
     }
 
-    // ── Prepare realtime client once ──
+    // ── Prepare realtime client once (best-effort) ──
     let service = null;
     try {
       requireEnv(['WPS_CONNECTION', 'WPS_HUB']);
@@ -143,56 +61,72 @@ app.http('inject', {
 
     const results = [];
     for (const raw of items) {
-      const url = String((raw && raw.url) || '').trim();
-      const manualHeadline = String((raw && raw.headline) || '').trim();
+      const title = clampStr((raw && raw.title) || '', MAX_TITLE).trim();
+      const kind = (raw && raw.kind === 'pdf') ? 'pdf' : 'html';
+      const sourceUrl = clampStr((raw && raw.sourceUrl) || '', 2000).trim();
+      const source = clampStr((raw && raw.source) || '', MAX_SOURCE).trim();
+      const bodyHtml = clampStr((raw && raw.bodyHtml) || '', MAX_BODY_CHARS);
+      const bodyText = clampStr((raw && raw.bodyText) || '', MAX_BODY_CHARS);
 
-      if (!url) {
-        results.push({ ok: false, url, error: 'Empty URL.' });
-        continue;
-      }
-
-      let fetched;
-      try {
-        fetched = await fetchOne(url);
-      } catch (e) {
-        results.push({ ok: false, url, error: e.message || 'Fetch failed.' });
+      if (!title && !bodyHtml && !bodyText) {
+        results.push({ ok: false, error: 'Empty release skipped.' });
         continue;
       }
 
       const now = Date.now();
       const id = crypto.randomUUID();
+
+      // ── Build the entity, chunking the two large fields ──
+      let htmlChunks, textChunks;
+      try {
+        htmlChunks = splitBody(bodyHtml, 'bh');   // bh0, bh1, … bhChunks
+        textChunks = splitBody(bodyText, 'bt');   // bt0, bt1, … btChunks
+      } catch (e) {
+        // BODY_TOO_LARGE from the chunker → clean, per-item rejection.
+        results.push({ ok: false, error: e.message || 'Release too large to store.' });
+        continue;
+      }
+
       const release = {
         partitionKey: 'release',
         rowKey: String(now) + '-' + id,
         id,
-        kind: fetched.kind,                       // 'html' | 'pdf'
-        contentType: fetched.contentType,
-        sourceUrl: fetched.sourceUrl,
-        headline: manualHeadline || '',           // optional manual override
-        html: fetched.kind === 'html' ? fetched.text : '',
-        base64: fetched.kind === 'pdf' ? fetched.base64 : '',
+        kind,
+        contentType: kind === 'pdf' ? 'application/pdf' : 'text/html',
+        sourceUrl,
+        headline: title,
+        source,
         injectedBy: author,
         createdAt: now,
+        ...htmlChunks,
+        ...textChunks,
       };
 
       try {
         await tables.upsert(TABLES.RELEASES, release);
       } catch (e) {
         context.error('inject store failed: ' + (e && e.message));
-        results.push({ ok: false, url, error: 'Could not save release.' });
+        results.push({ ok: false, error: 'Could not save release.' });
         continue;
       }
 
-      // Broadcast the new release (best-effort).
+      // ── Broadcast a LIGHT payload (metadata only). Clients pull full bodies
+      //    from /api/state so we never push ~1MB frames over the socket. ──
       if (service) {
         try {
-          await service.group(WIRE_GROUP).sendToAll({ type: 'release', payload: release });
+          await service.group(WIRE_GROUP).sendToAll({
+            type: 'release',
+            payload: {
+              id, kind, headline: title, source, sourceUrl,
+              injectedBy: author, createdAt: now,
+            },
+          });
         } catch (e) {
           context.error('inject broadcast failed: ' + (e && e.message));
         }
       }
 
-      results.push({ ok: true, id, url: fetched.sourceUrl, kind: fetched.kind });
+      results.push({ ok: true, id, kind });
     }
 
     const ok = results.filter((r) => r.ok).length;
