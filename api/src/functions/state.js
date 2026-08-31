@@ -1,15 +1,16 @@
 // FILE: api/src/functions/state.js
 // Training Wire — GET /api/state
-// Returns the current shared wire state (releases + publish history) so a terminal
-// can rebuild its full view on login or after a reconnect. Session required.
-// Flags are folded into their history entries (entry.wrong), so the client gets a
-// single consistent snapshot.
+// Returns the shared wire snapshot (releases + per-chain publish history) so a
+// terminal can rebuild its whole view on login or after a reconnect. Release
+// bodies are rejoined from their chunk properties (see shared/chunk.js).
+// Session required. Flags are folded into history entries (entry.wrong).
 'use strict';
 
 const { app } = require('@azure/functions');
 const { LIMITS, TABLES } = require('../shared/config');
 const { getSession, json } = require('../shared/auth');
 const tables = require('../shared/tables');
+const { joinBody } = require('../shared/chunk');
 
 app.http('state', {
   methods: ['GET'],
@@ -28,11 +29,12 @@ app.http('state', {
         id: r.id,
         kind: r.kind,
         contentType: r.contentType,
-        sourceUrl: r.sourceUrl,
+        sourceUrl: r.sourceUrl || '',
         headline: r.headline || '',
-        html: r.kind === 'html' ? (r.html || '') : '',
-        base64: r.kind === 'pdf' ? (r.base64 || '') : '',
-        injectedBy: r.injectedBy,
+        source: r.source || '',
+        bodyHtml: joinBody(r, 'bh'),   // rejoined from bh0..bhN
+        bodyText: joinBody(r, 'bt'),   // rejoined from bt0..btN
+        injectedBy: r.injectedBy || '',
         createdAt: Number(r.createdAt || 0),
       }));
 
@@ -52,7 +54,7 @@ app.http('state', {
           alert: h.alert,
           releaseId: h.releaseId || null,
           author: h.author,
-          wrong: !!h.wrong,               // flag folded in
+          wrong: !!h.wrong,
           flaggedBy: h.flaggedBy || '',
           createdAt: Number(h.createdAt || 0),
         });
