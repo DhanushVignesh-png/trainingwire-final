@@ -1,10 +1,19 @@
 // FILE: frontend/wire-realtime.js
 // Training Wire — realtime layer.
 // Wraps the Web PubSub client socket. Negotiates a signed URL via WireClient,
-// connects, auto-reconnects with backoff, and dispatches the five server event
-// types (release / publish / flag / clear) to registered handlers. On every
-// (re)connect it fires an 'resync' callback so the app can pull /api/state and
-// guarantee it never misses events during a drop.
+// connects, JOINS the shared wire group, auto-reconnects with backoff, and
+// dispatches the four server event types (release / publish / flag / clear) to
+// registered handlers. On every (re)connect it fires a 'resync' callback so the
+// app can pull /api/state and guarantee it never misses events during a drop.
+//
+// ── THE FIX ──
+// Backend broadcasts with service.group(WIRE_GROUP).sendToAll(...). That delivers
+// ONLY to sockets that have JOINED the 'wire-all' group. The old code connected
+// but never sent a joinGroup frame, so the group had zero members and NO live
+// event ever arrived — everything only appeared after a manual refresh (which
+// hits /api/state directly, bypassing the socket). We now send joinGroup on every
+// open and re-join on every reconnect. The negotiate token already grants the
+// joinLeaveGroup role for this group, so no backend/token change is required.
 'use strict';
 
 (function () {
@@ -23,6 +32,8 @@
       this._reconnectTimer = null;
       this._heartbeatTimer = null;
       this._connected = false;
+      this._joined = false;     // true once the server acks our group join
+      this._ackSeq = 0;         // monotonic ackId for joinGroup frames
     }
 
     on(type, fn) { this._handlers[type] = fn; return this; }
@@ -46,6 +57,7 @@
         this._ws = null;
       }
       this._connected = false;
+      this._joined = false;
       this._emitStatus('offline');
     }
 
@@ -57,6 +69,7 @@
     async _connect() {
       if (!this._shouldRun) return;
       this._emitStatus('connecting');
+      this._joined = false;
 
       // Get a fresh signed URL every connect — they're short-lived by design.
       try {
@@ -71,8 +84,8 @@
 
       let ws;
       try {
-        // Web PubSub supports the json.reliable.webpubsub.azure.v1 subprotocol,
-        // but for broadcast-to-group we use the simple json protocol.
+        // The PubSub subprotocol lets the client send joinGroup frames and
+        // receive group messages. This is required for group broadcasts to work.
         ws = new WebSocket(this._url, 'json.webpubsub.azure.v1');
       } catch (e) {
         return this._scheduleReconnect();
@@ -82,9 +95,14 @@
       ws.onopen = () => {
         this._connected = true;
         this._reconnectAttempts = 0;
+
+        // ── CRITICAL: join the wire group. Without this, group broadcasts from
+        //    the backend never reach this socket and live updates never arrive. ──
+        this._joinGroup();
+
         this._emitStatus('online');
         // Fire resync so the app pulls the authoritative snapshot and can't have
-        // missed anything while it was disconnected.
+        // missed anything while it was disconnected. (Reconnect only — one pull.)
         if (this._resyncHandler) { try { this._resyncHandler(); } catch (e) {} }
         this._startHeartbeat();
       };
@@ -95,6 +113,7 @@
 
       ws.onclose = () => {
         this._connected = false;
+        this._joined = false;
         this._clearTimers();
         this._ws = null;
         if (this._shouldRun) {
@@ -106,11 +125,28 @@
       };
     }
 
+    // Send a joinGroup frame for the shared wire group. Safe to call repeatedly;
+    // the server treats a re-join as a no-op. Guarded so a closed socket can't throw.
+    _joinGroup() {
+      if (!this._group) return;
+      if (!this._ws || this._ws.readyState !== WebSocket.OPEN) return;
+      this._ackSeq += 1;
+      try {
+        this._ws.send(JSON.stringify({
+          type: 'joinGroup',
+          group: this._group,
+          ackId: this._ackSeq,
+        }));
+      } catch (e) { /* onclose/reconnect will recover */ }
+    }
+
     _startHeartbeat() {
       // Web PubSub handles keepalive at the protocol level, but a light client
       // ping guards against silent half-open sockets behind corporate proxies.
+      // It also re-asserts group membership if an ack was ever missed.
       this._heartbeatTimer = setInterval(() => {
         if (this._ws && this._ws.readyState === WebSocket.OPEN) {
+          if (!this._joined) this._joinGroup();   // self-heal a missed join ack
           try {
             this._ws.send(JSON.stringify({ type: 'event', event: 'ping', dataType: 'json', data: { t: Date.now() } }));
           } catch (e) {}
@@ -132,8 +168,21 @@
       let msg;
       try { msg = JSON.parse(evt.data); } catch (e) { return; }
 
-      // Web PubSub wraps group/server messages. The actual payload we broadcast
-      // from the backend sits in msg.data. Unwrap defensively across shapes.
+      // ── System frames from the PubSub subprotocol ──
+      // Ack a successful joinGroup so we know the socket is really in the group.
+      if (msg.type === 'ack') {
+        if (msg.success === true) this._joined = true;
+        // A failed ack with "Forbidden" would mean a token/role problem; we leave
+        // _joined false and the heartbeat will retry. Nothing else to do here.
+        return;
+      }
+      // System frames (connected/disconnected) carry no wire payload.
+      if (msg.type === 'system') return;
+
+      // ── Group / server messages carry our broadcast payload in msg.data ──
+      // Backend sends: service.group('wire-all').sendToAll({ type, payload }).
+      // With this subprotocol the frame looks like:
+      //   { type:'message', from:'group', group:'wire-all', dataType:'json', data:{...} }
       let payload = null;
       if (msg.type === 'message' && msg.data !== undefined) {
         payload = msg.data;
@@ -150,7 +199,7 @@
       if (!payload || typeof payload !== 'object') return;
 
       const type = payload.type;
-      if (!EVENTS.includes(type)) return;    // ignore ping acks / system frames
+      if (!EVENTS.includes(type)) return;    // ignore ping frames / anything else
 
       const handler = this._handlers[type];
       if (handler) {
