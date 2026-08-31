@@ -4,133 +4,168 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="referrer" content="no-referrer" />
-  <meta name="color-scheme" content="dark" />
+  <meta name="color-scheme" content="light" />
   <title>Training Wire</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="stylesheet" href="terminal.css" />
 </head>
 <body>
-  <!-- Auth gate mounts here -->
+  <!-- Auth gate mounts here (light-themed) -->
   <div id="auth-root" class="auth-root" aria-live="polite"></div>
 
   <!-- Main terminal shell (hidden until authed) -->
-  <div id="app-root" class="app-root" hidden>
-    <!-- Top bar -->
-    <header class="topbar">
-      <div class="topbar-left">
-        <span class="brand-mark">◆</span>
-        <span class="brand-text">TRAINING&nbsp;WIRE</span>
+  <div id="app-root" hidden>
+
+    <!-- ═══ TOP TOOLBAR ═══ -->
+    <div class="toolbar">
+      <div class="tb-l">
+        <span class="tb-brand">◧ TRAINING WIRE</span>
         <span class="env-tag">SIMULATION</span>
       </div>
-      <div class="topbar-right">
-        <span id="conn-status" class="conn-status conn-offline" title="Realtime status">
+      <div class="tb-c">
+        <span id="conn-status" class="conn-status conn-connecting" title="Realtime status">
           <span class="conn-dot"></span><span class="conn-label">connecting…</span>
         </span>
-        <span id="user-chip" class="user-chip"></span>
-        <button id="btn-logout" class="btn-ghost btn-sm" type="button">Sign out</button>
       </div>
-    </header>
+      <div class="tb-r">
+        <span id="user-chip" class="user-chip" title=""></span>
+        <button class="tb-btn ghost" id="btnSettings">⚙ Settings</button>
+        <button class="tb-btn ghost" id="btnLogout">Sign out</button>
+      </div>
+    </div>
 
-    <!-- Body: 3-column terminal layout -->
-    <main class="workspace">
-      <!-- LEFT: Inject / staging panel -->
-      <aside class="panel panel-left" id="panel-inject">
-        <div class="panel-head">
-          <h2 class="panel-title">Inject Releases</h2>
-          <span class="panel-hint">Stage source URLs, push live</span>
-        </div>
-        <div class="panel-body">
-          <div class="field">
-            <label class="field-label" for="inject-url">Source URL</label>
-            <div class="field-row">
-              <input class="input" id="inject-url" type="url" placeholder="https://…" spellcheck="false" />
-              <button class="btn-accent btn-sm" id="btn-stage" type="button">Stage</button>
-            </div>
-            <div class="field-note" id="inject-note"></div>
+    <!-- ═══ MAIN 2-PANE ═══ -->
+    <div class="workspace" id="workspace">
+
+      <!-- ─── PANE 1: BLOTTER + PUBLISH HISTORY DOCK ─── -->
+      <section class="pane pane-blotter" id="paneBlotter">
+        <div class="pane-top">
+          <div class="tabs">
+            <button class="tab on" data-mode="live">Releases</button>
+            <button class="tab-clear" id="btnClearReleases" title="Clear the wire for everyone">✕ Clear</button>
           </div>
-          <div class="staged" id="staged-list" aria-label="Staged releases"></div>
-          <button class="btn-primary btn-block" id="btn-inject" type="button" disabled>
-            Push staged to wire
-          </button>
-        </div>
-      </aside>
-
-      <!-- CENTER: Live wire feed -->
-      <section class="panel panel-center" id="panel-wire">
-        <div class="panel-head">
-          <h2 class="panel-title">Live Wire</h2>
-          <div class="panel-actions">
-            <button class="btn-ghost btn-sm" id="btn-refresh" type="button" title="Resync">↻</button>
-            <button class="btn-danger btn-sm" id="btn-clear" type="button" title="Global reset">Reset wire</button>
+          <div class="find-wrap">
+            <input type="text" id="findStory" class="find" placeholder="Find a release" />
+            <span class="find-ico">⌕</span>
           </div>
         </div>
-        <div class="panel-body wire-feed" id="wire-feed" aria-live="polite">
-          <div class="empty-state" id="wire-empty">
-            <div class="empty-mark">◇</div>
-            <p>No releases yet. Stage a source on the left and push it live.</p>
+        <div class="blotter-scroll">
+          <table class="blotter" id="blotter">
+            <thead>
+              <tr>
+                <th class="c-time sortable" data-sort="time">Time</th>
+                <th class="c-id sortable" data-sort="id">ID</th>
+                <th class="c-head sortable" data-sort="head">Headline</th>
+                <th class="c-src sortable" data-sort="src">Source</th>
+              </tr>
+            </thead>
+            <tbody id="blotterBody">
+              <tr class="empty-row"><td colspan="4">No releases yet. Open Settings → Send Releases to inject one.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Dock: Publish History (resizable, per-chain) -->
+        <div class="dock dock-ph" id="dockPH">
+          <div class="dock-resize" id="dockResizePH" title="Drag to resize"></div>
+          <div class="dock-tabs">
+            <button class="dock-tab on" data-dock="pubhist">Publish History</button>
+            <span class="dock-scope" id="phScope"></span>
+          </div>
+          <div class="dock-body">
+            <div class="dock-panel on" id="dockPubhist"></div>
           </div>
         </div>
       </section>
 
-      <!-- RIGHT: Reader + publish -->
-      <aside class="panel panel-right" id="panel-reader">
-        <div class="panel-head">
-          <h2 class="panel-title">Reader</h2>
-          <span class="panel-hint" id="reader-hint">Select a release</span>
+      <div class="splitter" id="split1"></div>
+
+      <!-- ─── PANE 2: READER + ALERT EDITOR DOCK ─── -->
+      <section class="pane pane-reader" id="paneReader">
+        <div class="reader-head">
+          <div class="reader-headline" id="readerHeadline">Select a release</div>
+          <button class="tb-btn ghost" id="btnExportPdf" title="Export the release as a PDF">⤓ Export PDF</button>
         </div>
-        <div class="panel-body">
-          <div class="reader-view" id="reader-view">
-            <div class="empty-state">
-              <div class="empty-mark">◎</div>
-              <p>Open a release from the wire to read it and publish an alert.</p>
+        <div class="reader-sub" id="readerSub"></div>
+        <div class="reader-body-wrap">
+          <div class="reader-body" id="readerBody">
+            <div class="reader-placeholder">The full formatted release body appears here. Highlight any text to send it to the Alert Editor.</div>
+          </div>
+        </div>
+        <div class="reader-foot">
+          <span class="reader-src-tag" id="readerSrcTag"></span>
+          <span class="reader-selhint">Select text → Alert Editor · Double-click to reset</span>
+          <div class="zoom">
+            <span>A-</span>
+            <input type="range" id="zoom" min="11" max="20" value="13" />
+            <span>A+</span>
+          </div>
+        </div>
+
+        <!-- Dock: Alert Editor (resizable) -->
+        <div class="dock dock-ae" id="dockAE">
+          <div class="dock-resize" id="dockResizeAE" title="Drag to resize"></div>
+          <div class="dock-tabs">
+            <button class="dock-tab on" data-dock="alert">Alert Editor</button>
+          </div>
+          <div class="dock-body">
+            <div class="dock-panel on" id="dockAlert">
+              <div class="ae-wrap">
+                <div class="ae-hint">Highlight text in the release to fill the snap (articles a/an/the are removed automatically). Edit freely, then Publish. Double-click empty space to reset.</div>
+                <div class="ae-row">
+                  <input type="text" id="aeSource" class="ae-src" placeholder="SOURCE" spellcheck="false" />
+                  <textarea id="aeBody" class="ae-body" placeholder="SELECTED TEXT…" spellcheck="false"></textarea>
+                </div>
+                <div class="ae-foot">
+                  <span class="ae-cc" id="aeCharCount">0 chars</span>
+                  <div class="ae-actions">
+                    <button class="ae-btn ghost" id="aeClear">Clear</button>
+                    <button class="ae-btn" id="aePublish">Publish</button>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
-        <div class="publish-dock" id="publish-dock" hidden>
-          <div class="field">
-            <label class="field-label" for="pub-chain">Chain</label>
-            <input class="input" id="pub-chain" type="text" placeholder="e.g. GOLD, USD, OIL" spellcheck="false" />
-          </div>
-          <div class="field">
-            <label class="field-label" for="pub-alert">Alert headline</label>
-            <textarea class="input textarea" id="pub-alert" rows="2" maxlength="240"
-                      placeholder="Type the market-moving alert…"></textarea>
-            <div class="field-note"><span id="pub-count">0</span>/240</div>
-          </div>
-          <button class="btn-primary btn-block" id="btn-publish" type="button">Publish alert</button>
+      </section>
+    </div>
+
+    <!-- ═══ SETTINGS MODAL (draggable + resizable) ═══ -->
+    <div class="modal-overlay" id="settingsModal" style="display:none">
+      <div class="modal" id="settingsPanel">
+        <div class="modal-hdr" id="settingsHeader">
+          <h2>Settings</h2>
+          <button class="modal-close" id="btnCloseSettings">✕</button>
         </div>
-      </aside>
-    </main>
+        <div class="modal-body">
 
-    <!-- Publish history strip -->
-    <footer class="ticker" id="ticker">
-      <div class="ticker-head">HISTORY</div>
-      <div class="ticker-body" id="ticker-body"></div>
-    </footer>
-  </div>
+          <div class="set-card">
+            <h3>Send Releases <span class="sr-counter" id="srCounter">0 / 15 staged</span></h3>
+            <div class="set-hint">Add up to 15 releases by URL (HTML page or PDF). Type the headline yourself (recommended). Leave it blank to auto-detect. Fill an entry and click "Save" to stage it, then click "Send All Releases" to push them live to everyone.</div>
+            <div id="srStaged"></div>
+            <div id="srDraftHost"></div>
+            <div class="set-row" style="margin-top:10px">
+              <button class="s-btn send" id="btnSendAll" disabled>Send All Releases</button>
+              <button class="s-btn ghost" id="btnClearAll">Clear Staged</button>
+            </div>
+          </div>
 
-  <!-- Confirm modal (clear/global reset) -->
-  <div id="modal-root" class="modal-root" hidden>
-    <div class="modal-backdrop" data-close></div>
-    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
-      <h3 id="modal-title" class="modal-title">Reset the wire for everyone?</h3>
-      <p class="modal-body">
-        This permanently clears <b>all releases, all published alerts, and all flags</b>
-        for <b>every connected terminal</b>. It cannot be undone.
-      </p>
-      <div class="field">
-        <label class="field-label" for="confirm-text">Type <b>RESET</b> to confirm</label>
-        <input class="input" id="confirm-text" type="text" autocomplete="off" spellcheck="false" placeholder="RESET" />
-      </div>
-      <div class="modal-actions">
-        <button class="btn-ghost" id="modal-cancel" type="button">Cancel</button>
-        <button class="btn-danger" id="modal-confirm" type="button" disabled>Reset everything</button>
+          <div class="set-card">
+            <h3>Keyword Highlights</h3>
+            <div class="set-hint">Comma-separated keywords highlighted in the reader. Money, %, and dates are always highlighted.</div>
+            <textarea id="templateKeywords" rows="4" spellcheck="false"></textarea>
+            <div class="set-row" style="margin-top:6px">
+              <button class="s-btn pri" id="btnSaveTemplate">Save Keywords</button>
+              <button class="s-btn ghost" id="btnResetTemplate">Reset Default</button>
+            </div>
+          </div>
+
+        </div>
+        <div class="modal-resize" id="settingsResize" title="Drag to resize"></div>
       </div>
     </div>
-  </div>
 
-  <!-- Toast host -->
-  <div id="toast-host" class="toast-host" aria-live="assertive"></div>
+    <div class="toasts" id="toastContainer"></div>
+  </div>
 
   <!-- Scripts: order matters (no modules; CSP script-src 'self') -->
   <script src="wire-client.js"></script>
