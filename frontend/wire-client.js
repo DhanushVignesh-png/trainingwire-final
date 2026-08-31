@@ -150,11 +150,18 @@ async function getState() {
   return request('/state', { method: 'GET', auth: 'session' });
 }
 
+// Fetch ONE release (with its full body) by id. Used for lazy-loading a body
+// when a user opens a release, instead of pulling the whole snapshot.
+async function getRelease(id) {
+  const safe = encodeURIComponent(String(id || '').trim());
+  return request('/release?id=' + safe, { method: 'GET', auth: 'session' });
+}
+
 // ── Public surface ────────────────────────────────────────────────────────
 window.WireClient = {
   ApiError,
   hasSession, getSessionToken, getRegToken, clearTokens,
   requestOtp, verifyOtp, setMpin, loginMpin,
   negotiate,
-  fetchArticle, injectReleases, publishAlert, flagAlert, clearWire, getState,
+  fetchArticle, injectReleases, publishAlert, flagAlert, clearWire, getState, getRelease,
 };
