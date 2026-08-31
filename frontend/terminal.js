@@ -1,435 +1,597 @@
 // FILE: frontend/terminal.js
-// Training Wire — main application controller.
-// Boots the auth gate, then runs the terminal: staging + injecting releases,
-// rendering the live wire, reading releases, publishing alerts, flagging wrong
-// alerts, and the guarded global reset. Wires the realtime socket and uses the
-// resync hook to pull /api/state on every (re)connect so nothing is ever missed.
-// All untrusted content goes through ReleaseFormatter. All DOM text is set safely.
+// Training Wire — Controller (1.6 UX, cloud backend).
+// Boots the auth gate, then runs the 1.6 blotter: shared releases from everyone,
+// formatted reader with tables/bullets/highlights, Alert Editor (article-stripping)
+// that publishes to the cloud, per-release Publish History docked under the blotter
+// with X-flag toggling (synced to everyone), Clear (global reset), PDF export,
+// draggable+resizable Settings with Send Releases (client fetches + formats, then
+// posts finished bodies to /api/inject). Realtime keeps every terminal in sync.
 'use strict';
 
 (function () {
-  // ── App state (client mirror of the shared wire) ──────────────────────────
+  console.log('Training Wire: Controller (cloud/1.6)');
+
+  // ═══ STATE ═══
   const state = {
     email: '',
-    releases: [],                 // [{id, kind, headline, html/base64, sourceUrl, createdAt}]
-    history: {},                  // chain -> [{rowKey, alert, wrong, ...}]
-    staged: [],                   // [{url, headline?}] client-only until pushed
-    activeReleaseId: null,
+    releases: [],            // [{id, kind, headline, source, bodyHtml, bodyText, sourceUrl, injectedBy, createdAt}]
+    history: {},             // releaseId(chain) -> [{rowKey, alert, author, wrong, createdAt}]
+    selectedId: null,        // release id (UUID)
   };
+  let sortKey = 'time', sortDir = -1;
+  let highlightKeywords = [];
+  const MAX_RELEASES = 15;
+  let stagedReleases = [];   // { url, headline }
 
-  // ── Boot ───────────────────────────────────────────────────────────────────
+  // Friendly incrementing display id (#1, #2…) mapped to each UUID (1.6 look).
+  const displayIdMap = {};
+  let displaySeq = 0;
+  function displayId(uuid) {
+    if (!displayIdMap[uuid]) displayIdMap[uuid] = ++displaySeq;
+    return displayIdMap[uuid];
+  }
+
+  const DEFAULT_HIGHLIGHT_KEYWORDS = [
+    'dividend','cash','per share','buyback','repurchase','acquisition','acquire','merger',
+    'results','revenue','earnings','guidance','profit','loss','net income','EBITDA',
+    'market','management','CEO','CFO','appoints','appointed','resigns','stepping down',
+    'agreement','contract','partnership','FDA','approval','launch','offering','IPO',
+    'United States','quarterly','annual','forecast','outlook','record','completes'
+  ];
+
+  // ═══ TINY HELPERS ═══
+  function esc(t){ if(t==null)return ''; const d=document.createElement('div'); d.textContent=String(t); return d.innerHTML; }
+  function bind(id,ev,fn){ const e=document.getElementById(id); if(e) e.addEventListener(ev,fn); }
+  function hms(ts){ return new Date(ts).toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'}); }
+  function toast(msg,type='i'){ const c=document.getElementById('toastContainer'); if(!c)return; const t=document.createElement('div'); t.className='toast '+type; t.textContent=msg; c.appendChild(t); setTimeout(()=>{t.style.opacity='0';t.style.transition='opacity .3s';setTimeout(()=>t.remove(),300);},3200); }
+  function lsGet(k,def){ try{ const v=localStorage.getItem(k); return v==null?def:JSON.parse(v); }catch(e){ return def; } }
+  function lsSet(k,v){ try{ localStorage.setItem(k,JSON.stringify(v)); }catch(e){} }
+
+  // ═══ BOOT ═══
   const authRoot = document.getElementById('auth-root');
   const appRoot = document.getElementById('app-root');
-
   const auth = new window.AuthFlow(authRoot, onAuthed);
   auth.start();
 
-  async function onAuthed() {
+  async function onAuthed(){
     authRoot.hidden = true;
     appRoot.hidden = false;
-    bindTerminal();
+    initEvents();
+    loadPrefs();
+    initSplitters();
+    initDockResizers();
+    initSettingsDragResize();
+    renderSendReleases();
     await hydrate();
     startRealtime();
   }
 
-  // ── Initial + resync snapshot ────────────────────────────────────────────
-  async function hydrate() {
-    try {
+  // ═══ SNAPSHOT (initial + every reconnect) ═══
+  async function hydrate(){
+    try{
       const snap = await window.WireClient.getState();
       state.email = snap.user || '';
       state.releases = Array.isArray(snap.releases) ? snap.releases : [];
-      state.history = snap.history && typeof snap.history === 'object' ? snap.history : {};
+      state.history = (snap.history && typeof snap.history==='object') ? snap.history : {};
       renderUserChip();
-      renderWire();
-      renderHistory();
-      // If the active release vanished (e.g. after a reset), clear the reader.
-      if (state.activeReleaseId && !state.releases.find(r => r.id === state.activeReleaseId)) {
-        state.activeReleaseId = null;
+      renderBlotter();
+      renderPubHistory();
+      if (state.selectedId && !state.releases.find(r=>r.id===state.selectedId)) {
+        state.selectedId = null;
         renderReader(null);
+      } else if (state.selectedId) {
+        renderReader(state.releases.find(r=>r.id===state.selectedId));
       }
-    } catch (err) {
-      if (err.status === 401) return bounceToLogin();
-      toast(err.message || 'Could not load the wire.', 'error');
+    }catch(err){
+      if(err.status===401) return bounceToLogin();
+      toast(err.message||'Could not load the wire.','r');
     }
   }
 
-  // ── Realtime ────────────────────────────────────────────────────────────────
-  function startRealtime() {
+  // ═══ REALTIME ═══
+  function startRealtime(){
     const rt = window.WireRealtime;
     rt.onStatus(setConnStatus);
-    rt.onResync(() => { hydrate(); });   // pull authoritative state on every connect
-    rt.on('release', (payload) => {
-      upsertRelease(payload);
-      renderWire();
-      toast('New release on the wire', 'info');
-    });
-    rt.on('publish', (payload) => {
-      addHistory(payload);
-      renderHistory();
-    });
-    rt.on('flag', (payload) => {
-      applyFlag(payload);
-      renderHistory();
-    });
-    rt.on('clear', (payload) => {
-      state.releases = [];
-      state.history = {};
-      state.activeReleaseId = null;
-      window.ReleaseFormatter.revokeAll();
-      renderWire(); renderHistory(); renderReader(null);
-      const who = payload && payload.by ? ` by ${payload.by}` : '';
-      toast(`Wire was reset${who}`, 'warn');
+    rt.onResync(()=>{ hydrate(); });
+    rt.on('release',(p)=>{ upsertReleaseMeta(p); renderBlotter(); toast('New release on the wire','i'); });
+    rt.on('publish',(p)=>{ addHistory(p); if(p.chain===state.selectedId) renderPubHistory(); });
+    rt.on('flag',(p)=>{ applyFlag(p); if(p.chain===state.selectedId) renderPubHistory(); });
+    rt.on('clear',(p)=>{
+      state.releases=[]; state.history={}; state.selectedId=null;
+      renderBlotter(); renderPubHistory(); renderReader(null);
+      toast('Wire cleared'+(p&&p.by?(' by '+p.by):''),'w');
     });
     rt.start();
   }
-
-  function setConnStatus(status) {
-    const el = document.getElementById('conn-status');
-    if (!el) return;
-    const label = el.querySelector('.conn-label');
-    el.classList.remove('conn-online', 'conn-offline', 'conn-connecting');
-    if (status === 'online') { el.classList.add('conn-online'); label.textContent = 'live'; }
-    else if (status === 'offline') { el.classList.add('conn-offline'); label.textContent = 'offline'; }
-    else { el.classList.add('conn-connecting'); label.textContent = status === 'reconnecting' ? 'reconnecting…' : 'connecting…'; }
+  function setConnStatus(status){
+    const el=document.getElementById('conn-status'); if(!el)return;
+    const label=el.querySelector('.conn-label');
+    el.classList.remove('conn-online','conn-offline','conn-connecting');
+    if(status==='online'){ el.classList.add('conn-online'); label.textContent='live'; }
+    else if(status==='offline'){ el.classList.add('conn-offline'); label.textContent='offline'; }
+    else { el.classList.add('conn-connecting'); label.textContent= status==='reconnecting'?'reconnecting…':'connecting…'; }
   }
 
-  // ── State mutators ───────────────────────────────────────────────────────
-  function upsertRelease(r) {
-    if (!r || !r.id) return;
-    const i = state.releases.findIndex(x => x.id === r.id);
-    if (i === -1) state.releases.unshift(r);
-    else state.releases[i] = r;
-    state.releases.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  // The broadcast payload is LIGHT (no body). Pull the full body via hydrate() so
+  // the reader has bodyHtml. We upsert metadata immediately for a snappy blotter.
+  function upsertReleaseMeta(r){
+    if(!r||!r.id) return;
+    const i=state.releases.findIndex(x=>x.id===r.id);
+    const meta={ id:r.id, kind:r.kind, headline:r.headline||'', source:r.source||'', sourceUrl:r.sourceUrl||'', injectedBy:r.injectedBy||'', createdAt:r.createdAt||Date.now(), bodyHtml:'', bodyText:'' };
+    if(i===-1) state.releases.unshift(meta);
+    else state.releases[i]={ ...state.releases[i], ...meta, bodyHtml:state.releases[i].bodyHtml, bodyText:state.releases[i].bodyText };
+    state.releases.sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
+    // Pull full bodies in the background so the reader works when opened.
+    hydrate();
   }
-  function addHistory(h) {
-    if (!h || !h.chain) return;
-    if (!state.history[h.chain]) state.history[h.chain] = [];
-    const arr = state.history[h.chain];
-    if (!arr.find(x => x.rowKey === h.rowKey)) arr.unshift(h);
+  function addHistory(h){
+    if(!h||!h.chain) return;
+    if(!state.history[h.chain]) state.history[h.chain]=[];
+    const arr=state.history[h.chain];
+    if(!arr.find(x=>x.rowKey===h.rowKey)) arr.unshift(h);
   }
-  function applyFlag(f) {
-    if (!f || !f.chain) return;
-    const arr = state.history[f.chain];
-    if (!arr) return;
-    const row = arr.find(x => x.rowKey === f.rowKey);
-    if (row) { row.wrong = !!f.wrong; row.flaggedBy = f.flaggedBy || ''; }
-  }
-
-  // ── Terminal bindings ────────────────────────────────────────────────────
-  function bindTerminal() {
-    document.getElementById('btn-logout').addEventListener('click', doLogout);
-    document.getElementById('btn-refresh').addEventListener('click', () => hydrate());
-
-    // Inject / staging
-    const urlInput = document.getElementById('inject-url');
-    document.getElementById('btn-stage').addEventListener('click', () => stageUrl(urlInput.value));
-    urlInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); stageUrl(urlInput.value); } });
-    document.getElementById('btn-inject').addEventListener('click', pushStaged);
-
-    // Publish
-    const alertBox = document.getElementById('pub-alert');
-    alertBox.addEventListener('input', () => {
-      document.getElementById('pub-count').textContent = String(alertBox.value.length);
-    });
-    document.getElementById('btn-publish').addEventListener('click', doPublish);
-
-    // Clear (guarded)
-    document.getElementById('btn-clear').addEventListener('click', openClearModal);
-    bindClearModal();
+  function applyFlag(f){
+    if(!f||!f.chain) return;
+    const arr=state.history[f.chain]; if(!arr) return;
+    const row=arr.find(x=>x.rowKey===f.rowKey);
+    if(row){ row.wrong=!!f.wrong; row.flaggedBy=f.flaggedBy||''; }
   }
 
-  async function doLogout() {
-    window.WireRealtime.stop();
+  // ═══ EVENTS ═══
+  function initEvents(){
+    bind('btnLogout','click',doLogout);
+    bind('btnSettings','click',()=>{ openSettings(); setTimeout(()=>{const e=document.getElementById('srDraftUrl'); if(e)e.focus();},60); });
+    bind('btnCloseSettings','click',closeSettings);
+    const sm=document.getElementById('settingsModal'); if(sm) sm.addEventListener('click',e=>{ if(e.target===sm) closeSettings(); });
+
+    bind('btnSendAll','click',sendAllReleases);
+    bind('btnClearAll','click',()=>{ stagedReleases=[]; renderSendReleases(); });
+    bind('btnClearReleases','click',clearWire);
+
+    bind('findStory','input',renderBlotter);
+    document.querySelectorAll('.blotter th.sortable').forEach(th=>th.addEventListener('click',()=>{
+      const k=th.dataset.sort; if(sortKey===k) sortDir=-sortDir; else {sortKey=k; sortDir=-1;} renderBlotter();
+    }));
+
+    bind('btnSaveTemplate','click',saveTemplate);
+    bind('btnResetTemplate','click',()=>{ highlightKeywords=[...DEFAULT_HIGHLIGHT_KEYWORDS]; document.getElementById('templateKeywords').value=highlightKeywords.join(', '); lsSet('nw_hl_keywords',highlightKeywords); toast('Keywords reset','i'); if(state.selectedId) renderReader(currentStory()); });
+
+    bind('zoom','input',()=>{ document.getElementById('readerBody').style.fontSize=document.getElementById('zoom').value+'px'; });
+    bind('btnExportPdf','click',exportReaderPdf);
+
+    const rb=document.getElementById('readerBody');
+    if(rb){ rb.addEventListener('mouseup',captureSelection); rb.addEventListener('keyup',captureSelection); }
+    document.addEventListener('dblclick',(e)=>{ const inAe=e.target&&(e.target.id==='aeBody'||e.target.id==='aeSource'); if(!inAe) resetAlertEditorBody(); });
+
+    bind('aeBody','input',updateAeCharCount);
+    bind('aeSource','input',updateAeCharCount);
+    bind('aeClear','click',()=>{ document.getElementById('aeBody').value=''; updateAeCharCount(); });
+    bind('aePublish','click',publishFromAlertEditor);
+  }
+
+  function openSettings(){ document.getElementById('settingsModal').style.display='grid'; }
+  function closeSettings(){ document.getElementById('settingsModal').style.display='none'; }
+
+  async function doLogout(){
+    try{ window.WireRealtime.stop(); }catch(e){}
     window.WireClient.clearTokens();
-    window.ReleaseFormatter.revokeAll();
     bounceToLogin();
   }
-
-  function bounceToLogin() {
-    appRoot.hidden = true;
-    authRoot.hidden = false;
-    authRoot.innerHTML = '';
-    const a = new window.AuthFlow(authRoot, onAuthed);
-    a.start();
+  function bounceToLogin(){
+    appRoot.hidden=true; authRoot.hidden=false; authRoot.innerHTML='';
+    const a=new window.AuthFlow(authRoot,onAuthed); a.start();
   }
 
-  // ── Staging + inject ─────────────────────────────────────────────────────
-  function stageUrl(raw) {
-    const note = document.getElementById('inject-note');
-    note.textContent = '';
-    const url = String(raw || '').trim();
-    if (!url) return;
-    let parsed;
-    try { parsed = new URL(url); } catch (e) { note.textContent = 'Enter a valid URL.'; return; }
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') { note.textContent = 'Only http/https URLs.'; return; }
-    if (state.staged.find(s => s.url === url)) { note.textContent = 'Already staged.'; return; }
-    if (state.staged.length >= 15) { note.textContent = 'Max 15 staged at once.'; return; }
-    state.staged.push({ url });
-    document.getElementById('inject-url').value = '';
-    renderStaged();
+  // ═══ PREFS (localStorage; no chrome.storage) ═══
+  function loadPrefs(){
+    const kw=lsGet('nw_hl_keywords',null);
+    highlightKeywords=(kw&&kw.length)?kw:[...DEFAULT_HIGHLIGHT_KEYWORDS];
+    const ta=document.getElementById('templateKeywords'); if(ta) ta.value=highlightKeywords.join(', ');
+  }
+  function saveTemplate(){
+    const raw=document.getElementById('templateKeywords').value;
+    highlightKeywords=raw.split(',').map(s=>s.trim()).filter(Boolean);
+    lsSet('nw_hl_keywords',highlightKeywords);
+    toast('Keywords saved','s');
+    if(state.selectedId) renderReader(currentStory());
   }
 
-  function renderStaged() {
-    const list = document.getElementById('staged-list');
-    const pushBtn = document.getElementById('btn-inject');
-    list.innerHTML = '';
-    state.staged.forEach((s, idx) => {
-      const row = document.createElement('div');
-      row.className = 'staged-row';
-      const label = document.createElement('span');
-      label.className = 'staged-url';
-      label.textContent = s.url;             // safe
-      label.title = s.url;
-      const rm = document.createElement('button');
-      rm.className = 'staged-remove';
-      rm.type = 'button';
-      rm.textContent = '×';
-      rm.addEventListener('click', () => { state.staged.splice(idx, 1); renderStaged(); });
-      row.appendChild(label); row.appendChild(rm);
-      list.appendChild(row);
-    });
-    pushBtn.disabled = state.staged.length === 0;
-    pushBtn.textContent = state.staged.length
-      ? `Push ${state.staged.length} to wire` : 'Push staged to wire';
+  // ═══ SEND RELEASES ═══
+  function renderSendReleases(){
+    const counter=document.getElementById('srCounter');
+    if(counter) counter.textContent=stagedReleases.length+' / '+MAX_RELEASES+' staged';
+    const host=document.getElementById('srStaged');
+    if(host){
+      if(!stagedReleases.length){ host.innerHTML=''; }
+      else {
+        let h='';
+        stagedReleases.forEach((r,i)=>{
+          const mode=window.ReleaseFormatter.detectSourceType(r.url).toUpperCase();
+          const label=r.headline?r.headline:r.url;
+          h+='<div class="sr-staged-row">'
+            +'<span class="sr-badge">'+(i+1)+'</span>'
+            +'<span class="sr-hl" title="'+esc(r.headline?r.headline+' — '+r.url:r.url)+'">'+esc(label)+'</span>'
+            +'<span class="sr-mode">'+mode+'</span>'
+            +'<button class="sr-del" data-idx="'+i+'" title="Remove">✕</button>'
+            +'</div>';
+        });
+        host.innerHTML=h;
+        host.querySelectorAll('.sr-del').forEach(b=>b.addEventListener('click',()=>{ stagedReleases.splice(parseInt(b.dataset.idx,10),1); renderSendReleases(); }));
+      }
+    }
+    const draftHost=document.getElementById('srDraftHost');
+    if(draftHost){
+      if(stagedReleases.length>=MAX_RELEASES){
+        draftHost.innerHTML='<div class="sr-maxed">Maximum '+MAX_RELEASES+' releases staged. Send them or remove one to add more.</div>';
+      } else {
+        draftHost.innerHTML=
+          '<div class="sr-draft">'
+          +'<label>Headline (optional — leave blank to auto-detect)</label>'
+          +'<input type="text" id="srDraftHeadline" placeholder="e.g. NIKE, Inc. Reports Fiscal 2026 Fourth Quarter and Full Year Results">'
+          +'<label>Release URL (HTML page or PDF)</label>'
+          +'<input type="text" id="srDraftUrl" placeholder="https://www.example.com/news/… or …/report.pdf">'
+          +'<div class="sr-draft-actions"><button class="s-btn pri" id="btnStageDraft">Save</button></div>'
+          +'</div>';
+        bind('btnStageDraft','click',stageDraft);
+        const u=document.getElementById('srDraftUrl'); if(u) u.addEventListener('keydown',e=>{ if(e.key==='Enter'){e.preventDefault();stageDraft();} });
+        const hd=document.getElementById('srDraftHeadline'); if(hd) hd.addEventListener('keydown',e=>{ if(e.key==='Enter'){e.preventDefault();document.getElementById('srDraftUrl').focus();} });
+      }
+    }
+    const sendAll=document.getElementById('btnSendAll'); if(sendAll) sendAll.disabled=stagedReleases.length===0;
+  }
+  function stageDraft(){
+    const url=(document.getElementById('srDraftUrl')?.value||'').trim();
+    const headline=(document.getElementById('srDraftHeadline')?.value||'').trim();
+    if(!url){ toast('Paste a URL first','w'); return; }
+    if(!/^https?:\/\//i.test(url)){ toast('URL must start with http(s)://','w'); return; }
+    if(stagedReleases.length>=MAX_RELEASES){ toast('Max '+MAX_RELEASES+' releases','w'); return; }
+    stagedReleases.push({ url, headline });
+    renderSendReleases();
+    setTimeout(()=>{ const e=document.getElementById('srDraftHeadline'); if(e)e.focus(); },40);
   }
 
-  async function pushStaged() {
-    if (!state.staged.length) return;
-    const btn = document.getElementById('btn-inject');
-    btn.disabled = true; btn.textContent = 'Pushing…';
-    try {
-      const res = await window.WireClient.injectReleases(state.staged.slice());
-      const okCount = res.injected || 0;
-      const fails = (res.results || []).filter(r => !r.ok);
-      state.staged = [];
-      renderStaged();
-      if (okCount) toast(`Pushed ${okCount} release${okCount > 1 ? 's' : ''} live`, 'success');
-      if (fails.length) toast(`${fails.length} failed: ${fails[0].error || 'fetch error'}`, 'error');
-      // Realtime 'release' events will populate the wire; hydrate as a safety net.
+  // Client fetches (via hardened /api/article-fetch), formats with 1.6 formatter,
+  // then posts the FINISHED body to /api/inject (Option A).
+  async function sendAllReleases(){
+    if(!stagedReleases.length){ toast('Nothing staged','w'); return; }
+    const btn=document.getElementById('btnSendAll');
+    btn.disabled=true; const old=btn.textContent; btn.textContent='Fetching…';
+    const batch=[...stagedReleases];
+    stagedReleases=[];
+    const payloadItems=[];
+    let skipped=0;
+
+    for(const r of batch){
+      let fetched;
+      try{
+        fetched=await window.WireClient.fetchArticle(r.url);   // {kind, text|base64, sourceUrl}
+      }catch(e){
+        if(e.status===401){ btn.disabled=false; btn.textContent=old; return bounceToLogin(); }
+        skipped++; toast('Skipped a URL (fetch failed)','w'); continue;
+      }
+      let formatted;
+      try{
+        formatted=await window.ReleaseFormatter.format({ kind:fetched.kind, data:fetched.text, base64:fetched.base64, url:fetched.sourceUrl||r.url });
+      }catch(fe){ skipped++; toast('Skipped a URL (parse failed)','w'); continue; }
+      if(!formatted || (!formatted.html && !formatted.text)){ skipped++; toast('Skipped a URL (empty release)','w'); continue; }
+      const title=r.headline || formatted.title || window.ReleaseFormatter.guessHeadline(formatted.text||'');
+      const source=deriveSource(title);
+      payloadItems.push({ title, bodyHtml:formatted.html, bodyText:formatted.text, kind:fetched.kind, sourceUrl:fetched.sourceUrl||r.url, source });
+    }
+
+    if(!payloadItems.length){ btn.disabled=false; btn.textContent=old; renderSendReleases(); toast('No releases sent','w'); return; }
+
+    btn.textContent='Sending…';
+    try{
+      const res=await window.WireClient.injectReleases(payloadItems);
+      const okCount=res.injected||0;
+      const fails=(res.results||[]).filter(x=>!x.ok);
+      if(okCount) toast('Sent '+okCount+' release'+(okCount===1?'':'s')+' to the wire','s');
+      if(fails.length) toast(fails.length+' failed: '+(fails[0].error||'error'),'r');
+    }catch(err){
+      if(err.status===401) return bounceToLogin();
+      toast(err.message||'Send failed.','r');
+    }finally{
+      btn.disabled=false; btn.textContent=old;
+      renderSendReleases();
+      closeSettings();
       hydrate();
-    } catch (err) {
-      if (err.status === 401) return bounceToLogin();
-      toast(err.message || 'Inject failed.', 'error');
-    } finally {
-      renderStaged();
     }
   }
 
-  // ── Wire feed ────────────────────────────────────────────────────────────
-  function renderWire() {
-    const feed = document.getElementById('wire-feed');
-    const empty = document.getElementById('wire-empty');
-    // Wipe all but the empty-state node.
-    Array.from(feed.querySelectorAll('.wire-card')).forEach(n => n.remove());
-
-    if (!state.releases.length) { if (empty) empty.style.display = ''; return; }
-    if (empty) empty.style.display = 'none';
-
-    for (const r of state.releases) {
-      const card = document.createElement('button');
-      card.className = 'wire-card' + (r.id === state.activeReleaseId ? ' is-active' : '');
-      card.type = 'button';
-      card.addEventListener('click', () => openRelease(r.id));
-
-      const kind = document.createElement('span');
-      kind.className = 'wire-kind wire-kind-' + (r.kind === 'pdf' ? 'pdf' : 'html');
-      kind.textContent = r.kind === 'pdf' ? 'PDF' : 'WEB';
-
-      const title = document.createElement('span');
-      title.className = 'wire-title';
-      title.textContent = window.ReleaseFormatter.preview(r, 120);   // safe text
-
-      const meta = document.createElement('span');
-      meta.className = 'wire-meta';
-      meta.textContent = timeAgo(r.createdAt) + (r.injectedBy ? ' · ' + shortEmail(r.injectedBy) : '');
-
-      const top = document.createElement('div');
-      top.className = 'wire-card-top';
-      top.appendChild(kind); top.appendChild(meta);
-      card.appendChild(top);
-      card.appendChild(title);
-      feed.appendChild(card);
-    }
+  // ═══ SOURCE-FROM-HEADLINE (1.6) ═══
+  function deriveSource(headline){
+    let h=String(headline||'').replace(/\s+/g,' ').trim();
+    if(!h) return '';
+    const actionRe=/\b(announces?|announced|reports?|reported|posts?|posted|declares?|declared|names?|named|appoints?|appointed|completes?|completed|launches?|launched|to\s+report|to\s+announce|delivers?|delivered|provides?|provided|sets?|raises?|raised|cuts?|updates?|files?|filed|acquires?|acquired|prices?|priced|issues?|issued|expands?|unveils?|introduces?)\b/i;
+    const m=h.match(actionRe);
+    let candidate='';
+    if(m&&m.index>0) candidate=h.slice(0,m.index).trim();
+    else { const cut=h.split(/\b(?:fiscal|first|second|third|fourth|q[1-4]|full[-\s]?year|quarter|half[-\s]?year)\b/i)[0]; candidate=(cut||'').trim(); }
+    candidate=candidate.replace(/[,:;\-–—]\s*$/,'').trim();
+    candidate=candidate.replace(/\s+\b(and|the|its|to)$/i,'').trim();
+    if(!candidate) return '';
+    if(candidate.length<2||candidate.length>60) return '';
+    if(candidate.split(' ').filter(Boolean).length>7) return '';
+    if(!/[A-Z]/.test(candidate)) return '';
+    return candidate;
   }
 
-  // ── Reader + publish ─────────────────────────────────────────────────────
-  function openRelease(id) {
-    state.activeReleaseId = id;
-    const r = state.releases.find(x => x.id === id);
-    renderWire();          // refresh active highlight
-    renderReader(r);
-  }
-
-  function renderReader(release) {
-    const view = document.getElementById('reader-view');
-    const dock = document.getElementById('publish-dock');
-    const hint = document.getElementById('reader-hint');
-    window.ReleaseFormatter.revokeAll();   // free any prior PDF blobs
-
-    if (!release) {
-      view.innerHTML = `
-        <div class="empty-state">
-          <div class="empty-mark">◎</div>
-          <p>Open a release from the wire to read it and publish an alert.</p>
-        </div>`;
-      dock.hidden = true;
-      hint.textContent = 'Select a release';
-      return;
-    }
-    view.innerHTML = '';
-    window.ReleaseFormatter.render(release, view);   // SANITIZED render
-    dock.hidden = false;
-    hint.textContent = release.kind === 'pdf' ? 'PDF release' : 'Web release';
-  }
-
-  async function doPublish() {
-    const chain = document.getElementById('pub-chain').value.trim().toUpperCase();
-    const alert = document.getElementById('pub-alert').value.trim();
-    if (!chain) return toast('Enter a chain.', 'error');
-    if (!alert) return toast('Enter an alert headline.', 'error');
-
-    const btn = document.getElementById('btn-publish');
-    btn.disabled = true; btn.textContent = 'Publishing…';
-    try {
-      await window.WireClient.publishAlert(chain, alert, state.activeReleaseId || null);
-      document.getElementById('pub-alert').value = '';
-      document.getElementById('pub-count').textContent = '0';
-      toast('Alert published', 'success');
-      // 'publish' realtime event updates history for everyone (incl. us).
-    } catch (err) {
-      if (err.status === 401) return bounceToLogin();
-      toast(err.message || 'Publish failed.', 'error');
-    } finally {
-      btn.disabled = false; btn.textContent = 'Publish alert';
-    }
-  }
-
-  // ── History ticker + flagging ────────────────────────────────────────────
-  function renderHistory() {
-    const body = document.getElementById('ticker-body');
-    body.innerHTML = '';
-    // Flatten all chains, newest first.
-    const all = [];
-    for (const chain of Object.keys(state.history)) {
-      for (const h of state.history[chain]) all.push(h);
-    }
-    all.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-
-    if (!all.length) {
-      const none = document.createElement('span');
-      none.className = 'ticker-empty';
-      none.textContent = 'No alerts published yet.';
-      body.appendChild(none);
-      return;
-    }
-
-    for (const h of all.slice(0, 60)) {
-      const item = document.createElement('div');
-      item.className = 'ticker-item' + (h.wrong ? ' is-wrong' : '');
-
-      const chain = document.createElement('span');
-      chain.className = 'ticker-chain';
-      chain.textContent = h.chain;
-
-      const text = document.createElement('span');
-      text.className = 'ticker-text';
-      text.textContent = h.alert;
-
-      const flag = document.createElement('button');
-      flag.className = 'ticker-flag';
-      flag.type = 'button';
-      flag.title = h.wrong ? 'Marked wrong — click to clear' : 'Flag as wrong alert';
-      flag.textContent = h.wrong ? '⚑ WRONG' : '⚐';
-      flag.addEventListener('click', () => toggleFlag(h));
-
-      item.appendChild(chain);
-      item.appendChild(text);
-      item.appendChild(flag);
-      body.appendChild(item);
-    }
-  }
-
-  async function toggleFlag(h) {
-    try {
-      await window.WireClient.flagAlert(h.chain, h.rowKey, !h.wrong);
-      // 'flag' realtime event syncs everyone; optimistic update for snappiness:
-      h.wrong = !h.wrong;
-      renderHistory();
-    } catch (err) {
-      if (err.status === 401) return bounceToLogin();
-      toast(err.message || 'Could not update flag.', 'error');
-    }
-  }
-
-  // ── Clear (guarded global reset) ─────────────────────────────────────────
-  function openClearModal() {
-    const modal = document.getElementById('modal-root');
-    const input = document.getElementById('confirm-text');
-    const confirm = document.getElementById('modal-confirm');
-    modal.hidden = false;
-    input.value = '';
-    confirm.disabled = true;
-    setTimeout(() => input.focus(), 30);
-  }
-  function closeClearModal() {
-    document.getElementById('modal-root').hidden = true;
-  }
-  function bindClearModal() {
-    const modal = document.getElementById('modal-root');
-    const input = document.getElementById('confirm-text');
-    const confirm = document.getElementById('modal-confirm');
-    input.addEventListener('input', () => { confirm.disabled = input.value.trim().toUpperCase() !== 'RESET'; });
-    input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !confirm.disabled) doClear(); });
-    document.getElementById('modal-cancel').addEventListener('click', closeClearModal);
-    modal.querySelector('[data-close]').addEventListener('click', closeClearModal);
-    confirm.addEventListener('click', doClear);
-    document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !modal.hidden) closeClearModal(); });
-  }
-  async function doClear() {
-    const confirm = document.getElementById('modal-confirm');
-    confirm.disabled = true; confirm.textContent = 'Resetting…';
-    try {
+  // ═══ CLEAR (global reset — everyone) ═══
+  async function clearWire(){
+    if(!state.releases.length){ toast('No releases to clear','i'); return; }
+    const ok=window.confirm('Clear ALL releases?\n\nThis removes every release AND its publish history for EVERYONE connected. This cannot be undone.');
+    if(!ok) return;
+    try{
       await window.WireClient.clearWire();
-      closeClearModal();
       // 'clear' realtime event wipes state for everyone incl. us.
-      toast('Wire reset', 'success');
-    } catch (err) {
-      if (err.status === 401) return bounceToLogin();
-      toast(err.message || 'Reset failed.', 'error');
-    } finally {
-      confirm.textContent = 'Reset everything';
+      toast('Wire cleared','s');
+    }catch(err){
+      if(err.status===401) return bounceToLogin();
+      toast(err.message||'Clear failed.','r');
     }
   }
 
-  // ── UI helpers ───────────────────────────────────────────────────────────
-  function renderUserChip() {
-    const chip = document.getElementById('user-chip');
-    chip.textContent = state.email || '';
-    chip.title = state.email || '';
+  // ═══ BLOTTER ═══
+  function currentView(){
+    const q=(document.getElementById('findStory').value||'').toLowerCase();
+    let view=state.releases.filter(s=>{
+      if(q&&!((s.headline+' '+(s.source||'')+' '+(s.sourceUrl||'')).toLowerCase().includes(q))) return false;
+      return true;
+    });
+    view.sort((a,b)=>{
+      let av,bv;
+      if(sortKey==='time'){ av=a.createdAt; bv=b.createdAt; }
+      else if(sortKey==='id'){ av=displayId(a.id); bv=displayId(b.id); }
+      else if(sortKey==='head'){ av=(a.headline||'').toLowerCase(); bv=(b.headline||'').toLowerCase(); }
+      else if(sortKey==='src'){ av=(a.source||'').toLowerCase(); bv=(b.source||'').toLowerCase(); }
+      if(av<bv) return -1*sortDir; if(av>bv) return 1*sortDir; return 0;
+    });
+    return view;
   }
-  function shortEmail(e) { return String(e || '').split('@')[0]; }
-  function timeAgo(ts) {
-    if (!ts) return '';
-    const s = Math.floor((Date.now() - ts) / 1000);
-    if (s < 60) return s + 's ago';
-    const m = Math.floor(s / 60); if (m < 60) return m + 'm ago';
-    const h = Math.floor(m / 60); if (h < 24) return h + 'h ago';
-    return Math.floor(h / 24) + 'd ago';
+  function renderBlotter(){
+    const body=document.getElementById('blotterBody'); if(!body)return;
+    const view=currentView();
+    if(!view.length){ body.innerHTML='<tr class="empty-row"><td colspan="4">No releases yet. Open Settings → Send Releases to inject one.</td></tr>'; return; }
+    let h='';
+    view.forEach((s)=>{
+      const breaking=(Date.now()-s.createdAt)<8000;
+      const cls=(s.id===state.selectedId?'selected ':'')+(breaking?'breaking ':'');
+      const src=s.source||(s.kind==='pdf'?'PDF':'WEB');
+      h+='<tr class="'+cls.trim()+'" data-id="'+esc(s.id)+'">'
+        +'<td class="b-time">'+esc(hms(s.createdAt))+'</td>'
+        +'<td class="b-id">'+displayId(s.id)+'</td>'
+        +'<td class="b-head" title="'+esc(s.headline)+'">'+esc(s.headline||'(untitled)')+'</td>'
+        +'<td class="b-src" title="'+esc(src)+'">'+esc(src)+'</td>'
+        +'</tr>';
+    });
+    body.innerHTML=h;
+    body.querySelectorAll('tr[data-id]').forEach(tr=>tr.addEventListener('click',()=>selectStory(tr.dataset.id)));
   }
 
-  let _toastId = 0;
-  function toast(msg, kind) {
-    const host = document.getElementById('toast-host');
-    const el = document.createElement('div');
-    el.className = 'toast toast-' + (kind || 'info');
-    el.textContent = msg;                 // safe
-    const id = ++_toastId;
-    el.dataset.id = String(id);
-    host.appendChild(el);
-    requestAnimationFrame(() => el.classList.add('is-in'));
-    setTimeout(() => {
-      el.classList.remove('is-in');
-      setTimeout(() => { if (el.parentNode) el.parentNode.removeChild(el); }, 250);
-    }, 4000);
+  // ═══ SELECT + READER ═══
+  function currentStory(){ return state.selectedId ? state.releases.find(r=>r.id===state.selectedId) : null; }
+  function selectStory(id){
+    state.selectedId=id;
+    renderBlotter();
+    const s=currentStory();
+    renderReader(s);
+    renderPubHistory();
+    const aeSrc=document.getElementById('aeSource');
+    const aeBody=document.getElementById('aeBody');
+    if(aeSrc) aeSrc.value=((s&&s.source)||'').toUpperCase();
+    if(aeBody) aeBody.value='';
+    updateAeCharCount();
   }
+
+  function highlightNode(root){
+    const moneyRe=/(\$\s?\d[\d,]*(?:\.\d+)?(?:\s?(?:million|billion|mln|bln))?)/gi;
+    const pctRe=/(\d+(?:\.\d+)?\s?%)/g;
+    const dateRe1=/((?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4})/gi;
+    const dateRe2=/(\b\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4})/gi;
+    const kwList=highlightKeywords.filter(Boolean).map(k=>k.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'));
+    const kwRe=kwList.length?new RegExp('\\b('+kwList.join('|')+')\\b','gi'):null;
+    const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT,null);
+    const targets=[]; let n; while((n=walker.nextNode())){ if(n.nodeValue&&n.nodeValue.trim()) targets.push(n); }
+    targets.forEach(textNode=>{
+      let html=esc(textNode.nodeValue);
+      html=html.replace(moneyRe,'\u0001M\u0002$1\u0003').replace(pctRe,'\u0001P\u0002$1\u0003')
+               .replace(dateRe1,'\u0001D\u0002$1\u0003').replace(dateRe2,'\u0001D\u0002$1\u0003');
+      if(kwRe) html=html.replace(kwRe,'\u0001K\u0002$1\u0003');
+      html=html.replace(/\u0001M\u0002/g,'<mark class="hl hl-money">').replace(/\u0001P\u0002/g,'<mark class="hl hl-pct">')
+               .replace(/\u0001D\u0002/g,'<mark class="hl hl-date">').replace(/\u0001K\u0002/g,'<mark class="hl hl-kw">')
+               .replace(/\u0003/g,'</mark>');
+      if(html!==esc(textNode.nodeValue)){ const span=document.createElement('span'); span.innerHTML=html; textNode.parentNode.replaceChild(span,textNode); }
+    });
+  }
+
+  function renderReader(s){
+    const headline=document.getElementById('readerHeadline');
+    const sub=document.getElementById('readerSub');
+    const rb=document.getElementById('readerBody');
+    const srcTag=document.getElementById('readerSrcTag');
+    if(!s){
+      headline.textContent='Select a release';
+      sub.innerHTML='';
+      rb.innerHTML='<div class="reader-placeholder">The full formatted release body appears here. Highlight any text to send it to the Alert Editor.</div>';
+      if(srcTag) srcTag.textContent='';
+      return;
+    }
+    headline.textContent=s.headline||'(untitled)';
+    const co=s.source||'';
+    sub.innerHTML=
+      (co?'<span class="co">'+esc(co)+'</span>':'')
+      +'<span class="src-chip">#'+displayId(s.id)+'</span>'
+      +'<span>'+esc(hms(s.createdAt))+'</span>'
+      +'<span class="src-chip">'+esc((s.kind||'html').toUpperCase())+'</span>'
+      +(s.injectedBy?'<span class="src-chip">'+esc(s.injectedBy.split('@')[0])+'</span>':'')
+      +(s.sourceUrl?'<a href="'+esc(s.sourceUrl)+'" target="_blank" rel="noopener noreferrer nofollow">Open ↗</a>':'');
+    // SECURITY: stored HTML is re-sanitised before it touches innerHTML.
+    if(s.bodyHtml){
+      rb.innerHTML=window.ReleaseFormatter.sanitizeStored(s.bodyHtml);
+      try{ highlightNode(rb); }catch(e){}
+    } else {
+      rb.innerHTML='<p class="rl-p">'+esc(s.bodyText||'(No body text available — reopen after it syncs.)')+'</p>';
+    }
+    rb.style.fontSize=(document.getElementById('zoom').value||13)+'px';
+    if(srcTag) srcTag.textContent='Source: '+((s.kind||'html').toUpperCase());
+  }
+
+  // ═══ ALERT EDITOR ═══
+  function stripArticles(text){
+    if(!text) return '';
+    let t=String(text);
+    t=t.replace(/\b(a|an|the)\b/gi,'');
+    t=t.replace(/\s{2,}/g,' ').replace(/\s+([,.;:!?)])/g,'$1').replace(/([(])\s+/g,'$1');
+    return t.trim();
+  }
+  function captureSelection(){
+    const sel=window.getSelection?window.getSelection():null; if(!sel) return;
+    const text=(sel.toString()||'').replace(/\s+/g,' ').trim(); if(!text) return;
+    const rb=document.getElementById('readerBody');
+    if(rb&&sel.anchorNode&&!rb.contains(sel.anchorNode)) return;
+    const aeBody=document.getElementById('aeBody');
+    const aeSrc=document.getElementById('aeSource');
+    const s=currentStory();
+    if(aeSrc&&!aeSrc.value&&s) aeSrc.value=(s.source||'').toUpperCase();
+    aeBody.value=stripArticles(text).toUpperCase();
+    updateAeCharCount();
+  }
+  function resetAlertEditorBody(){ const aeBody=document.getElementById('aeBody'); if(aeBody&&aeBody.value){ aeBody.value=''; updateAeCharCount(); } }
+  function aeComposed(){
+    const src=(document.getElementById('aeSource').value||'').trim().toUpperCase();
+    const body=(document.getElementById('aeBody').value||'').trim().toUpperCase();
+    if(!body) return '';
+    return (src?src+': ':'')+body;
+  }
+  function updateAeCharCount(){ const line=aeComposed(); const el=document.getElementById('aeCharCount'); if(!el)return; const n=line.length; el.textContent=n+' chars'; el.classList.toggle('over',n>100); }
+
+  async function publishFromAlertEditor(){
+    const s=currentStory();
+    if(!s){ toast('Select a release first','w'); return; }
+    let line=aeComposed();
+    if(!line){ toast('Nothing to publish — highlight text or type a snap','w'); return; }
+    if(line.length>240) line=line.slice(0,240);
+    const btn=document.getElementById('aePublish');
+    btn.disabled=true; const old=btn.textContent; btn.textContent='Publishing…';
+    try{
+      // chain = release id (per-release history, 1.6 "Chain #ID"); author = email.
+      await window.WireClient.publishAlert(s.id, line, s.id);
+      document.getElementById('aeBody').value='';
+      updateAeCharCount();
+      toast('Published','s');
+      // 'publish' realtime event updates history for everyone incl. us.
+    }catch(err){
+      if(err.status===401) return bounceToLogin();
+      toast(err.message||'Publish failed.','r');
+    }finally{
+      btn.disabled=false; btn.textContent=old;
+    }
+  }
+
+  // ═══ PUBLISH HISTORY (per-release, docked) ═══
+  function renderPubHistory(){
+    const el=document.getElementById('dockPubhist'); if(!el)return;
+    const scope=document.getElementById('phScope');
+    const s=currentStory();
+    if(scope) scope.textContent = s ? ('· Chain #'+displayId(s.id)) : '';
+    if(!s){ el.innerHTML='<div class="dock-empty">Select a release to see its publish history.</div>'; return; }
+    const hist=state.history[s.id]||[];
+    if(!hist.length){ el.innerHTML='<div class="dock-empty">No published snaps for this release yet. Publish from the Alert Editor.</div>'; return; }
+    let h='<table class="ph-table"><thead><tr>'
+      +'<th style="width:150px">Author</th>'
+      +'<th style="width:82px">Publish Time</th>'
+      +'<th>Alert text</th>'
+      +'<th class="c-flag" title="Flag a wrong snap">Flag</th>'
+      +'</tr></thead><tbody>';
+    hist.forEach((p)=>{
+      const flagged=!!p.wrong;
+      const rowCls=flagged?' class="ph-flagged"':'';
+      const btnCls='ph-x'+(flagged?' active':'');
+      const btnTitle=flagged?'Marked wrong — click to clear':'Mark this snap as wrong';
+      h+='<tr'+rowCls+'>'
+        +'<td class="ph-author" title="'+esc(p.author)+'">'+esc((p.author||'').split('@')[0])+'</td>'
+        +'<td class="ph-time">'+esc(hms(p.createdAt))+'</td>'
+        +'<td class="ph-text">'+esc(p.alert)+'</td>'
+        +'<td class="ph-flagcell"><button class="'+btnCls+'" data-row="'+esc(p.rowKey)+'" title="'+esc(btnTitle)+'" aria-pressed="'+flagged+'">✕</button></td>'
+        +'</tr>';
+    });
+    h+='</tbody></table>';
+    el.innerHTML=h;
+    el.querySelectorAll('.ph-x').forEach(b=>b.addEventListener('click',()=>toggleSnapFlag(s.id,b.dataset.row)));
+  }
+  async function toggleSnapFlag(chain,rowKey){
+    const arr=state.history[chain]||[];
+    const row=arr.find(x=>x.rowKey===rowKey); if(!row) return;
+    const desired=!row.wrong;
+    try{
+      await window.WireClient.flagAlert(chain,rowKey,desired);
+      // optimistic; 'flag' event will confirm for everyone
+      row.wrong=desired; renderPubHistory();
+      toast(desired?'Snap flagged as wrong':'Flag removed', desired?'w':'i');
+    }catch(err){
+      if(err.status===401) return bounceToLogin();
+      toast(err.message||'Could not update flag.','r');
+    }
+  }
+
+  // ═══ PDF EXPORT (print) ═══
+  function exportReaderPdf(){
+    const s=currentStory();
+    if(!s){ toast('Select a release first','w'); return; }
+    let root=document.getElementById('pdfExportRoot');
+    if(!root){ root=document.createElement('div'); root.id='pdfExportRoot'; document.body.appendChild(root); }
+    const meta=[s.source,'#'+displayId(s.id),hms(s.createdAt),s.sourceUrl].filter(Boolean).map(esc).join(' &nbsp;·&nbsp; ');
+    const safeBody = s.bodyHtml ? window.ReleaseFormatter.sanitizeStored(s.bodyHtml) : ('<p class="rl-p">'+esc(s.bodyText||'')+'</p>');
+    root.innerHTML='<div class="pdf-title">'+esc(s.headline)+'</div><div class="pdf-meta">'+meta+'</div>'+safeBody;
+    const cleanup=()=>{ root.innerHTML=''; window.removeEventListener('afterprint',cleanup); };
+    window.addEventListener('afterprint',cleanup);
+    setTimeout(()=>window.print(),60);
+  }
+
+  // ═══ USER CHIP ═══
+  function renderUserChip(){ const chip=document.getElementById('user-chip'); if(!chip)return; chip.textContent=state.email||''; chip.title=state.email||''; }
+
+  // ═══ SPLITTER ═══
+  function initSplitters(){ makeSplitter('split1','paneBlotter'); }
+  function makeSplitter(id,paneId){
+    const sp=document.getElementById(id), pane=document.getElementById(paneId), ws=document.getElementById('workspace');
+    if(!sp||!pane) return;
+    let dragging=false;
+    sp.addEventListener('mousedown',e=>{ dragging=true; document.body.style.cursor='col-resize'; e.preventDefault(); });
+    window.addEventListener('mousemove',e=>{ if(!dragging)return; const rect=ws.getBoundingClientRect(); let w=e.clientX-rect.left; w=Math.max(240,Math.min(w,rect.width-360)); pane.style.width=w+'px'; pane.style.flex='none'; });
+    window.addEventListener('mouseup',()=>{ if(dragging){ dragging=false; document.body.style.cursor=''; } });
+  }
+
+  // ═══ DOCK RESIZERS ═══
+  function initDockResizers(){ makeDockResizer('dockResizeAE','dockAE'); makeDockResizer('dockResizePH','dockPH'); }
+  function makeDockResizer(handleId,dockId){
+    const handle=document.getElementById(handleId), dock=document.getElementById(dockId);
+    if(!handle||!dock) return;
+    let dragging=false, startY=0, startH=0;
+    handle.addEventListener('mousedown',e=>{ dragging=true; startY=e.clientY; startH=dock.getBoundingClientRect().height; document.body.style.cursor='row-resize'; e.preventDefault(); });
+    window.addEventListener('mousemove',e=>{ if(!dragging)return; const paneH=dock.parentElement.getBoundingClientRect().height; let h=startH+(startY-e.clientY); h=Math.max(80,Math.min(h,paneH-140)); dock.style.height=h+'px'; });
+    window.addEventListener('mouseup',()=>{ if(dragging){ dragging=false; document.body.style.cursor=''; } });
+  }
+
+  // ═══ SETTINGS DRAG + RESIZE ═══
+  function initSettingsDragResize(){
+    const panel=document.getElementById('settingsPanel');
+    const header=document.getElementById('settingsHeader');
+    const resize=document.getElementById('settingsResize');
+    if(!panel||!header) return;
+    let placed=false;
+    function ensurePlaced(){ if(placed)return; const r=panel.getBoundingClientRect(); panel.style.left=r.left+'px'; panel.style.top=r.top+'px'; panel.style.transform='none'; placed=true; }
+    let dragging=false, dx=0, dy=0;
+    header.addEventListener('mousedown',e=>{ if(e.target.id==='btnCloseSettings')return; ensurePlaced(); dragging=true; const r=panel.getBoundingClientRect(); dx=e.clientX-r.left; dy=e.clientY-r.top; document.body.style.cursor='move'; e.preventDefault(); });
+    window.addEventListener('mousemove',e=>{ if(!dragging)return; let nx=e.clientX-dx, ny=e.clientY-dy; nx=Math.max(0,Math.min(nx,window.innerWidth-80)); ny=Math.max(0,Math.min(ny,window.innerHeight-40)); panel.style.left=nx+'px'; panel.style.top=ny+'px'; });
+    window.addEventListener('mouseup',()=>{ if(dragging){ dragging=false; document.body.style.cursor=''; } });
+    if(resize){
+      let rz=false, sw=0, sh=0, sx=0, sy=0;
+      resize.addEventListener('mousedown',e=>{ ensurePlaced(); rz=true; const r=panel.getBoundingClientRect(); sw=r.width; sh=r.height; sx=e.clientX; sy=e.clientY; document.body.style.cursor='nwse-resize'; e.preventDefault(); e.stopPropagation(); });
+      window.addEventListener('mousemove',e=>{ if(!rz)return; let w=sw+(e.clientX-sx), h=sh+(e.clientY-sy); w=Math.max(420,Math.min(w,window.innerWidth-20)); h=Math.max(280,Math.min(h,window.innerHeight-20)); panel.style.width=w+'px'; panel.style.height=h+'px'; });
+      window.addEventListener('mouseup',()=>{ if(rz){ rz=false; document.body.style.cursor=''; } });
+    }
+  }
+
 })();
