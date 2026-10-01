@@ -18,7 +18,7 @@ app.http('mpin-set', {
     // ── Gate: must hold a valid REG token ──
     const reg = getRegSession(request);
     if (!reg) {
-      return json(401, { error: 'Your verification session has expired. Please sign in again.' });
+      return json(401, { error: 'Your verification session has expired. Please sign in again.', code: 'REG_EXPIRED' });
     }
     const email = reg.sub;
 

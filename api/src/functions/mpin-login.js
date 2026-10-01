@@ -16,9 +16,14 @@ app.http('mpin-login', {
   route: 'mpin-login',
   handler: async (request, context) => {
     // ── Gate: must hold a valid REG token ──
+    // 401 is used for two different things here, so each carries a machine-
+    // readable reason. Without it the client cannot tell "your token died,
+    // start again" from "wrong PIN, try again" — and treating a wrong PIN as a
+    // dead token throws the user back to the master code and discards the
+    // token they still legitimately hold.
     const reg = getRegSession(request);
     if (!reg) {
-      return json(401, { error: 'Your verification session has expired. Please sign in again.' });
+      return json(401, { error: 'Your verification session has expired. Please sign in again.', code: 'REG_EXPIRED' });
     }
     const email = reg.sub;
 
@@ -39,12 +44,12 @@ app.http('mpin-login', {
     const user = await tables.get(TABLES.USERS, 'user', email);
     if (!user || !user.mpinHash) {
       // No MPIN set — client should have been routed to "create". Be vague.
-      return json(401, { error: 'Incorrect MPIN.' });
+      return json(401, { error: 'Incorrect MPIN.', code: 'BAD_MPIN' });
     }
 
     // ── Verify (constant-time hash compare). No lockout by design. ──
     if (!verifyMpin(mpin, user.mpinHash)) {
-      return json(401, { error: 'Incorrect MPIN.' });
+      return json(401, { error: 'Incorrect MPIN.', code: 'BAD_MPIN' });
     }
 
     // ── Success: stamp last login and issue a full session ──

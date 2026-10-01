@@ -1,0 +1,6 @@
+# Normalise line endings in the repo (LF) while keeping native endings in the
+# working tree. Without this, a file edited on a different machine comes back
+# as a whole-file diff that hides the real change.
+* text=auto
+
+*.png binary

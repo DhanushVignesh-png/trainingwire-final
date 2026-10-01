@@ -1,0 +1,26 @@
+# Azure Functions local settings hold connection strings and the master code.
+# They must never be committed.
+local.settings.json
+api/local.settings.json
+
+# Dependencies (api/ is restored by the deploy, not committed)
+node_modules/
+
+# Build / tool output
+bin/
+obj/
+.azure/
+*.log
+
+# Backups superseded by version control
+*.bak
+*.orig
+*~
+
+# OS / editor junk
+Thumbs.db
+Desktop.ini
+.DS_Store
+*.swp
+.vscode/
+.idea/

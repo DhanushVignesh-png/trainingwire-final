@@ -84,10 +84,16 @@ async function request(path, { method = 'GET', body = null, auth = 'session' } =
   }
 
   if (!resp.ok) {
-    // 401 anywhere = session is dead. Nuke tokens so the UI bounces to login.
-    if (resp.status === 401) clearTokens();
+    // 401 usually means the token is dead, so tokens get cleared and the UI
+    // bounces to login. One exception: a wrong MPIN also answers 401, and
+    // throwing away a perfectly good reg-token over a typo would force the
+    // user back through the master code to try again. The server marks that
+    // case BAD_MPIN; anything without a reason is treated as a dead token.
+    if (resp.status === 401 && !(data && data.code === 'BAD_MPIN')) clearTokens();
     const msg = (data && data.error) ? data.error : `Request failed (${resp.status}).`;
-    throw new ApiError(msg, resp.status, data);
+    const e = new ApiError(msg, resp.status, data);
+    e.code = (data && data.code) || '';     // REG_EXPIRED | BAD_MPIN | ''
+    throw e;
   }
 
   return data || {};
@@ -113,6 +119,13 @@ async function setMpin(mpin) {
 
 async function loginMpin(mpin) {
   const data = await request('/mpin-login', { method: 'POST', body: { mpin }, auth: 'reg' });
+  if (data && data.token) { setSessionToken(data.token); setRegToken(null); }
+  return data;
+}
+
+// Forgotten MPIN. Same reg-token gate as setMpin, but allowed to overwrite.
+async function resetMpin(mpin) {
+  const data = await request('/mpin-reset', { method: 'POST', body: { mpin }, auth: 'reg' });
   if (data && data.token) { setSessionToken(data.token); setRegToken(null); }
   return data;
 }
@@ -160,7 +173,7 @@ async function getRelease(id) {
 window.WireClient = {
   ApiError,
   hasSession, getSessionToken, getRegToken, clearTokens,
-  verifyCode, setMpin, loginMpin,
+  verifyCode, setMpin, loginMpin, resetMpin,
   negotiate,
   fetchArticle, injectReleases, publishAlert, flagAlert, clearWire, getState, getRelease,
 };

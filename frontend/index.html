@@ -9,10 +9,54 @@
   <link rel="stylesheet" href="terminal.css" />
 </head>
 <body>
-  <!-- Auth gate mounts here (light-themed) -->
-  <div id="auth-root" class="auth-root" aria-live="polite"></div>
 
-  <!-- Main terminal shell (hidden until authed) -->
+  <!-- ═══ AUTH GATE (covers everything until the server says yes) ═══ -->
+  <div class="auth-gate" id="authGate" aria-live="polite">
+    <div class="auth-card">
+      <div class="auth-brand">◧ TRAINING WIRE</div>
+      <div class="auth-sub" id="authSub"></div>
+
+      <!-- Step 1: who are you -->
+      <div class="auth-step" id="authRegister">
+        <label class="auth-lbl" for="authEmail">Thomson Reuters email</label>
+        <input type="email" id="authEmail" class="auth-in" placeholder="first.last@thomsonreuters.com" autocomplete="username" spellcheck="false">
+        <label class="auth-lbl" for="authUser">Username <span class="auth-lbl-note">— your author name on every snap</span></label>
+        <input type="text" id="authUser" class="auth-in" placeholder="Dhanush" autocomplete="off" spellcheck="false">
+        <div class="auth-err" id="authRegErr"></div>
+        <button class="auth-btn" id="authRegisterGo">Continue</button>
+      </div>
+
+      <!-- Step 2: the master code -->
+      <div class="auth-step" id="authCode">
+        <div class="auth-note" id="authCodeNote"></div>
+        <label class="auth-lbl" for="authCodeIn">Master code</label>
+        <input type="password" id="authCodeIn" class="auth-in code" maxlength="6" inputmode="numeric" placeholder="------" autocomplete="off">
+        <div class="auth-err" id="authCodeErr"></div>
+        <button class="auth-btn" id="authVerifyCode">Verify</button>
+        <div class="auth-links">
+          <button class="auth-link" id="authCodeBack">Back</button>
+        </div>
+      </div>
+
+      <!-- Step 3: MPIN — set, enter, or reset -->
+      <div class="auth-step" id="authMpin">
+        <div class="auth-note" id="authMpinNote"></div>
+        <label class="auth-lbl" for="authMpin1">MPIN <span class="auth-lbl-note">— 6 digits</span></label>
+        <input type="password" id="authMpin1" class="auth-in code" maxlength="6" inputmode="numeric" placeholder="------" autocomplete="current-password">
+        <div id="authMpinConfirmWrap">
+          <label class="auth-lbl" for="authMpin2">Confirm MPIN</label>
+          <input type="password" id="authMpin2" class="auth-in code" maxlength="6" inputmode="numeric" placeholder="------" autocomplete="new-password">
+        </div>
+        <div class="auth-err" id="authMpinErr"></div>
+        <button class="auth-btn" id="authMpinGo">Sign in</button>
+        <div class="auth-links">
+          <button class="auth-link" id="authForgot">Forgot MPIN?</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ THE TOOL (hidden until authed) ═══ -->
   <div id="app-root" hidden>
 
     <!-- ═══ TOP TOOLBAR ═══ -->
@@ -21,26 +65,28 @@
         <span class="tb-brand">◧ TRAINING WIRE</span>
         <span class="env-tag">SIMULATION</span>
       </div>
-      <div class="tb-c">
-        <span id="conn-status" class="conn-status conn-connecting" title="Realtime status">
-          <span class="conn-dot"></span><span class="conn-label">connecting…</span>
-        </span>
-      </div>
+      <!-- The realtime status indicator goes back here once shared state is
+           wired. Showing a permanent "connecting…" while nothing connects
+           would just be a lie. -->
+      <div class="tb-c"></div>
       <div class="tb-r">
-        <span id="user-chip" class="user-chip" title=""></span>
+        <span class="tb-who" id="tbWho"></span>
+        <button class="tb-btn ghost" id="btnSignOut" title="End this session and return to the sign-in screen">Sign out</button>
         <button class="tb-btn ghost" id="btnSettings">⚙ Settings</button>
-        <button class="tb-btn ghost" id="btnLogout">Sign out</button>
       </div>
     </div>
 
     <!-- ═══ MAIN 2-PANE ═══ -->
     <div class="workspace" id="workspace">
 
-      <!-- ─── PANE 1: BLOTTER + PUBLISH HISTORY DOCK ─── -->
+      <!-- ─── PANE 1: BLOTTER + DOCKS ─── -->
       <section class="pane pane-blotter" id="paneBlotter">
         <div class="pane-top">
           <div class="tabs">
-            <button class="tab on" data-mode="live">Releases</button>
+            <button class="tab on" data-mode="live" title="File snaps off a release">Releases</button>
+            <button class="tab" data-mode="correct" title="Refile a chain with a correction">Correction</button>
+            <button class="tab" data-mode="withdraw" title="Withdraw a whole chain with an advisory">Withdraw</button>
+            <button class="tab" data-float="embargo" title="Build a bundle of snaps to queue or hold — opens a floating panel so the wire stays visible">Embargoes</button>
             <button class="tab-clear" id="btnClearReleases" title="Clear the wire for everyone">✕ Clear</button>
           </div>
           <div class="find-wrap">
@@ -64,26 +110,28 @@
           </table>
         </div>
 
-        <!-- Dock: Publish History (resizable, per-chain) -->
+        <!-- Dock: Publish History + Headline Activity -->
         <div class="dock dock-ph" id="dockPH">
           <div class="dock-resize" id="dockResizePH" title="Drag to resize"></div>
           <div class="dock-tabs">
             <button class="dock-tab on" data-dock="pubhist">Publish History</button>
+            <button class="dock-tab" data-dock="activity">Headline Activity</button>
             <span class="dock-scope" id="phScope"></span>
           </div>
           <div class="dock-body">
             <div class="dock-panel on" id="dockPubhist"></div>
+            <div class="dock-panel" id="dockActivity"></div>
           </div>
         </div>
       </section>
 
-      <div class="splitter" id="split1"></div>
+      <div class="splitter" id="split1" title="Drag to resize · double-click to snap to the screen edge"></div>
 
-      <!-- ─── PANE 2: READER + ALERT EDITOR DOCK ─── -->
+      <!-- ─── PANE 2: READER + EDITOR DOCKS ─── -->
       <section class="pane pane-reader" id="paneReader">
         <div class="reader-head">
           <div class="reader-headline" id="readerHeadline">Select a release</div>
-          <button class="tb-btn ghost" id="btnExportPdf" title="Export the release as a PDF">⤓ Export PDF</button>
+          <button class="cover-flag" id="btnCoverFlag" style="display:none"></button>
         </div>
         <div class="reader-sub" id="readerSub"></div>
         <div class="reader-body-wrap">
@@ -92,8 +140,7 @@
           </div>
         </div>
         <div class="reader-foot">
-          <span class="reader-src-tag" id="readerSrcTag"></span>
-          <span class="reader-selhint">Select text → Alert Editor · Double-click to reset</span>
+          <span class="reader-selhint">Select text → Alert Editor · Click to discard</span>
           <div class="zoom">
             <span>A-</span>
             <input type="range" id="zoom" min="11" max="20" value="13" />
@@ -101,19 +148,18 @@
           </div>
         </div>
 
-        <!-- Dock: Alert Editor (resizable) -->
+        <!-- Dock: Alert Editor / Correction / Withdraw -->
         <div class="dock dock-ae" id="dockAE">
           <div class="dock-resize" id="dockResizeAE" title="Drag to resize"></div>
           <div class="dock-tabs">
-            <button class="dock-tab on" data-dock="alert">Alert Editor</button>
+            <button class="dock-tab on" id="aeDockTab">Alert Editor</button>
+            <span class="dock-scope" id="aeScope"></span>
           </div>
           <div class="dock-body">
             <div class="dock-panel on" id="dockAlert">
               <div class="ae-wrap">
-                <div class="ae-hint">Highlight text in the release to fill the snap (articles a/an/the are removed automatically). Edit freely, then Publish. Double-click empty space to reset.</div>
                 <div class="ae-row">
-                  <input type="text" id="aeSource" class="ae-src" placeholder="SOURCE" spellcheck="false" />
-                  <textarea id="aeBody" class="ae-body" placeholder="SELECTED TEXT…" spellcheck="false"></textarea>
+                  <textarea id="aeBody" class="ae-body" placeholder="SOURCE: SELECTED TEXT…" spellcheck="false"></textarea>
                 </div>
                 <div class="ae-foot">
                   <span class="ae-cc" id="aeCharCount">0 chars</span>
@@ -124,9 +170,66 @@
                 </div>
               </div>
             </div>
+
+            <!-- Correction: refile the whole chain, tagged -->
+            <div class="dock-panel" id="dockCorrect">
+              <div class="ae-wrap">
+                <div class="ae-hint">Tick the snaps that were wrong and fix their wording. Everything you leave untouched refiles unchanged as <b>RPT</b>. The whole chain is filed again and replaces the live one — the old chain stays readable from Publish History.</div>
+                <div class="chain-list" id="correctChain"></div>
+                <div class="ae-foot">
+                  <span class="ae-cc" id="correctCount"></span>
+                  <div class="ae-actions">
+                    <button class="ae-btn ghost" id="correctReset">Reset</button>
+                    <button class="ae-btn" id="correctFile">File Correction</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Withdraw: kill the whole chain with an advisory -->
+            <div class="dock-panel" id="dockWithdraw">
+              <div class="ae-wrap">
+                <div class="ae-hint">The <b>entire chain</b> is withdrawn — you cannot withdraw one snap. Type the advisory explaining why; it is filed with the withdrawal and kept in Publish History alongside the withdrawn chain.</div>
+                <div class="chain-list readonly" id="withdrawChain"></div>
+                <textarea id="withdrawAdvisory" class="wd-advisory" placeholder="ADVISORY — WHY IS THIS CHAIN BEING WITHDRAWN?" spellcheck="false"></textarea>
+                <div class="ae-foot">
+                  <span class="ae-cc" id="withdrawCount"></span>
+                  <div class="ae-actions">
+                    <button class="ae-btn ghost" id="withdrawReset">Clear</button>
+                    <button class="ae-btn danger" id="withdrawFile">Withdraw Chain</button>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </section>
+    </div>
+
+    <!-- ═══ EMBARGO BUNDLE (floating, draggable, resizable) ═══ -->
+    <div class="emb-float" id="embFloat" style="display:none">
+      <div class="emb-hdr" id="embHeader">
+        <span class="emb-hdr-t">Embargo Bundle</span>
+        <input type="text" id="embTitle" class="emb-title" placeholder="Bundle title — this is the headline on the Releases page" spellcheck="false">
+        <button class="modal-close" id="embClose" title="Close (the bundle stays in the list below)">✕</button>
+      </div>
+      <div class="emb-bar">
+        <label class="emb-chk" title="Ticked = released automatically at the time below. Unticked = held until you publish it by hand."><input type="checkbox" id="embTimed" checked> Embargo</label>
+        <input type="date" id="embDate" class="emb-dt">
+        <input type="time" id="embTime" class="emb-dt" step="1">
+        <span class="emb-kind" id="embKind"></span>
+        <button class="emb-collapse" id="embCollapseAll" title="Show or hide the metadata on every alert">Hide metadata</button>
+        <button class="ae-btn" id="embAction">Queue Bundle</button>
+      </div>
+      <div class="emb-scroll">
+        <div class="emb-alerts" id="embAlerts"></div>
+        <div class="emb-addrow">
+          <button class="emb-add" id="embAdd" title="Copy the latest alert, metadata and all">＋</button>
+          <span class="emb-hint">Copies the latest alert including its metadata</span>
+        </div>
+        <div class="emb-saved" id="embSaved"></div>
+      </div>
+      <div class="modal-resize" id="embResize" title="Drag to resize"></div>
     </div>
 
     <!-- ═══ SETTINGS MODAL (draggable + resizable) ═══ -->
@@ -139,13 +242,21 @@
         <div class="modal-body">
 
           <div class="set-card">
-            <h3>Send Releases <span class="sr-counter" id="srCounter">0 / 15 staged</span></h3>
-            <div class="set-hint">Add up to 15 releases by URL (HTML page or PDF). Type the headline yourself (recommended). Leave it blank to auto-detect. Fill an entry and click "Save" to stage it, then click "Send All Releases" to push them live to everyone.</div>
+            <h3>Send Releases <span class="sr-counter" id="srCounter">0 / 25 staged</span></h3>
+            <div class="set-hint">Paste the full RNS or EDGAR release text (recommended — always works), or add a URL for static HTML/PDF pages. Type the headline yourself, or leave it blank to auto-detect. Click "Save" to stage each release, then "Send All Releases" to push them to the wire. Auto-snaps publish immediately on arrival.</div>
             <div id="srStaged"></div>
             <div id="srDraftHost"></div>
             <div class="set-row" style="margin-top:10px">
               <button class="s-btn send" id="btnSendAll" disabled>Send All Releases</button>
               <button class="s-btn ghost" id="btnClearAll">Clear Staged</button>
+            </div>
+          </div>
+
+          <div class="set-card">
+            <h3>Auto-Snap Engine</h3>
+            <div class="set-hint">Rule-based (no AI). Detects offers (Rule 2.4/2.7), rejections (Rule 2.8) and board changes, then auto-publishes snaps as author "Auto" the moment a release lands. Toggle off to inject releases silently for manual snapping only.</div>
+            <div class="set-row">
+              <label style="margin:0"><input type="checkbox" id="autoSnapToggle" checked> Auto-publish snaps on arrival</label>
             </div>
           </div>
 
@@ -164,13 +275,28 @@
       </div>
     </div>
 
+    <!-- ═══ YES / NO CONFIRM ═══ -->
+    <div class="ask-overlay" id="askOverlay" style="display:none">
+      <div class="ask-box">
+        <div class="ask-msg" id="askMsg"></div>
+        <div class="ask-btns">
+          <button class="ask-btn no" id="askNo">No</button>
+          <button class="ask-btn yes" id="askYes">Yes</button>
+        </div>
+      </div>
+    </div>
+
     <div class="toasts" id="toastContainer"></div>
   </div>
 
-  <!-- Scripts: order matters (no modules; CSP script-src 'self') -->
+  <!-- Scripts: order matters (no modules; CSP is script-src 'self') -->
+  <script src="store.js"></script>
   <script src="wire-client.js"></script>
+  <script src="release-builder.js"></script>
   <script src="release-formatter.js"></script>
   <script src="wire-realtime.js"></script>
+  <script src="snap-engine.js"></script>
+  <script src="embargo.js"></script>
   <script src="auth.js"></script>
   <script src="terminal.js"></script>
 </body>
