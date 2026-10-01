@@ -117,9 +117,24 @@ async function setMpin(mpin) {
   return data;
 }
 
-async function loginMpin(mpin) {
-  const data = await request('/mpin-login', { method: 'POST', body: { mpin }, auth: 'reg' });
+// Ordinary sign-in: email + MPIN, no master code and no reg token. The master
+// code is a one-time registration gate now, not a per-session password.
+async function loginMpin(email, mpin) {
+  const data = await request('/mpin-login', { method: 'POST', body: { email, mpin }, auth: 'none' });
   if (data && data.token) { setSessionToken(data.token); setRegToken(null); }
+  return data;
+}
+
+// ── Settings, both gated on the current MPIN server-side ──
+async function changeMpin(currentMpin, newMpin) {
+  const data = await request('/mpin-change', { method: 'POST', body: { currentMpin, newMpin }, auth: 'session' });
+  if (data && data.token) setSessionToken(data.token);     // fresh token, new name/pin state
+  return data;
+}
+
+async function updateName(currentMpin, name) {
+  const data = await request('/profile-name', { method: 'POST', body: { currentMpin, name }, auth: 'session' });
+  if (data && data.token) setSessionToken(data.token);
   return data;
 }
 
@@ -161,6 +176,11 @@ async function clearWire() {
   return request('/clear', { method: 'POST', auth: 'session' });
 }
 
+// Delete specific releases. Each takes its own snaps with it.
+async function deleteReleases(ids) {
+  return request('/delete', { method: 'POST', body: { ids }, auth: 'session' });
+}
+
 async function getState() {
   return request('/state', { method: 'GET', auth: 'session' });
 }
@@ -176,7 +196,7 @@ async function getRelease(id) {
 window.WireClient = {
   ApiError,
   hasSession, getSessionToken, getRegToken, clearTokens,
-  verifyCode, setMpin, loginMpin, resetMpin,
+  verifyCode, setMpin, loginMpin, resetMpin, changeMpin, updateName,
   negotiate,
-  fetchArticle, injectReleases, publishAlert, flagAlert, clearWire, getState, getRelease,
+  fetchArticle, injectReleases, publishAlert, flagAlert, clearWire, deleteReleases, getState, getRelease,
 };

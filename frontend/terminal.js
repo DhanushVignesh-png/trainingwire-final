@@ -25,6 +25,8 @@ let autoSnapOn = true;
 // Which list the left pane is showing, and therefore which editor the right
 // pane offers: file a snap, correct a chain, or withdraw one.
 let mode = 'live';              // 'live' | 'correct' | 'withdraw'
+let pickMode = false;           // choosing releases to delete
+let picked = new Set();         // serverIds ticked while picking
 let phTab = 'pubhist';          // 'pubhist' | 'activity'
 let showArchive = false;        // superseded chains visible in Publish History
 
@@ -405,8 +407,19 @@ async function joinSharedWire(){
       if(story.id === selectedId) renderPubHistory();
     },
 
+    // Somebody deleted specific releases.
+    onDelete: (p) => {
+      const ids = (p && p.ids) || [];
+      const mine = ids.filter(id => serverIdToLocal.has(id));
+      if(!mine.length) return;
+      removeReleasesLocally(ids);
+      if(pickMode){ mine.forEach(id => picked.delete(id)); updatePickCount(); }
+      toast(mine.length + ' release' + (mine.length===1?'':'s') + ' deleted by ' + ((p && p.by) || 'someone'), 'w');
+    },
+
     // Somebody cleared the wire for everyone.
     onClear: () => {
+      if(pickMode) exitPickMode();
       stories = []; storyById = {}; selectedId = null; nextId = 1; serverIdToLocal.clear();
       renderBlotter(); renderPubHistory(); renderActivity();
       document.getElementById('readerHeadline').innerHTML = 'Select a release';
@@ -439,7 +452,17 @@ function initEvents() {
 
   bind('btnSendAll','click',sendAllReleases);
   bind('btnClearAll','click',()=>{ stagedReleases=[]; renderSendReleases(); });
-  bind('btnClearReleases','click',clearAllReleases);
+
+  // ✕ Clear opens a choice; neither option fires on its own.
+  bind('btnClearReleases','click',(e)=>{ e.stopPropagation(); toggleClearMenu(); });
+  bind('clearAll','click',clearAllReleases);
+  bind('clearPick','click',enterPickMode);
+  bind('pickAll','change',togglePickAll);
+  bind('pickCancel','click',exitPickMode);
+  bind('pickDelete','click',confirmDeletePicked);
+
+  bind('btnSaveName','click',saveUsername);
+  bind('btnSaveMpin','click',saveNewMpin);
 
   bind('autoSnapToggle','change',()=>{ autoSnapOn=document.getElementById('autoSnapToggle').checked; sSet({nw_autosnap:autoSnapOn}); toast(autoSnapOn?'Auto-snap ON':'Auto-snap OFF', autoSnapOn?'s':'i'); });
 
@@ -494,7 +517,72 @@ function initEvents() {
   bind('aePublish','click',publishFromAlertEditor);
 }
 
-function openSettings(){ const m=document.getElementById('settingsModal'); m.style.display='grid'; centreOnFirstScreen(m); }
+// ═══ SETTINGS: ACCOUNT ═══
+// Both changes are gated on the current MPIN, and the gate is the server's —
+// this only clears the fields and reports what came back.
+function acctMsg(text, ok){
+  const el=document.getElementById('acctMsg'); if(!el) return;
+  el.textContent=text||'';
+  el.className='acct-msg'+(text?(ok?' ok':' bad'):'');
+}
+function clearAcctPins(){
+  ['acctCurrentPin','acctNewPin','acctNewPin2'].forEach(id=>{ const e=document.getElementById(id); if(e) e.value=''; });
+}
+
+async function saveUsername(){
+  const cur=(document.getElementById('acctCurrentPin').value||'').trim();
+  const name=(document.getElementById('acctName').value||'').trim();
+  acctMsg('');
+  if(!/^\d{6}$/.test(cur)){ acctMsg('Enter your current 6-digit MPIN first.',false); document.getElementById('acctCurrentPin').focus(); return; }
+  if(!/^[A-Za-z][A-Za-z .'\-]{1,23}$/.test(name)){ acctMsg('Username must start with a letter and be 2 to 24 letters.',false); return; }
+  const btn=document.getElementById('btnSaveName'); btn.disabled=true;
+  try{
+    const res=await WireClient.updateName(cur, name);
+    snapperName=res.name||name;
+    Auth.setUsername(snapperName);
+    renderWho({ username:snapperName, email:(Auth.current()||{}).email||'' });
+    renderAccountCard();
+    clearAcctPins();
+    document.getElementById('acctName').value='';
+    acctMsg('Username changed to '+snapperName+'. Snaps you already filed keep the name they went out under.',true);
+  }catch(e){
+    acctMsg(e.message||'Could not change your username.',false);
+    clearAcctPins();
+  }finally{ btn.disabled=false; }
+}
+
+async function saveNewMpin(){
+  const cur=(document.getElementById('acctCurrentPin').value||'').trim();
+  const a=(document.getElementById('acctNewPin').value||'').trim();
+  const b=(document.getElementById('acctNewPin2').value||'').trim();
+  acctMsg('');
+  if(!/^\d{6}$/.test(cur)){ acctMsg('Enter your current 6-digit MPIN first.',false); document.getElementById('acctCurrentPin').focus(); return; }
+  if(!/^\d{6}$/.test(a)){ acctMsg('The new MPIN must be 6 digits.',false); return; }
+  if(a!==b){ acctMsg('The two new MPINs do not match.',false); return; }
+  if(a===cur){ acctMsg('The new MPIN is the same as the current one.',false); return; }
+  const btn=document.getElementById('btnSaveMpin'); btn.disabled=true;
+  try{
+    await WireClient.changeMpin(cur, a);
+    clearAcctPins();
+    acctMsg('MPIN changed. Use the new one next time you sign in.',true);
+  }catch(e){
+    acctMsg(e.message||'Could not change your MPIN.',false);
+    clearAcctPins();
+  }finally{ btn.disabled=false; }
+}
+
+function renderAccountCard(){
+  const el=document.getElementById('acctWho'); if(!el) return;
+  const a=Auth.current();
+  el.innerHTML = a
+    ? 'Signed in as <b>'+esc(a.username)+'</b> &middot; '+esc(a.email)
+    : '';
+}
+
+function openSettings(){
+  const m=document.getElementById('settingsModal'); m.style.display='grid'; centreOnFirstScreen(m);
+  renderAccountCard(); acctMsg(''); clearAcctPins();
+}
 function closeSettings(){ document.getElementById('settingsModal').style.display='none'; }
 
 // ═══ YES / NO ═══
@@ -581,15 +669,149 @@ function syncEmbargoTab(){
 }
 
 // ═══ CLEAR ALL RELEASES ═══
-// Clearing is SHARED: it wipes the wire for every trainee, not just this
-// browser. The wording says so, because the old copy ("resets the tool") no
-// longer describes what happens.
+// ═══ CLEARING AND DELETING ═══
+// Both wipe things for every trainee, not just this screen, so ✕ Clear opens a
+// choice rather than firing straight away. "Clear all" is the old behaviour;
+// picking is for keeping today's releases and dropping the rest.
+function toggleClearMenu(){
+  const m=document.getElementById('clearMenu'); if(!m) return;
+  const open = m.style.display === 'none';
+  m.style.display = open ? 'block' : 'none';
+  if(open){
+    // One outside click closes it. Registered after this click finishes, or it
+    // would catch the very click that opened the menu.
+    setTimeout(()=>document.addEventListener('click', closeClearMenuOnce, { once:true }), 0);
+  }
+}
+function closeClearMenuOnce(){
+  const m=document.getElementById('clearMenu'); if(m) m.style.display='none';
+}
+
 function clearAllReleases(){
+  closeClearMenuOnce();
   if(!stories.length){ toast('No releases to clear','i'); return; }
   askYesNo(
     'Clear the wire for everyone?\n\nThis removes every release and all published snaps for every signed-in trainee, not just on this screen. It cannot be undone.',
     doClearAllReleases
   );
+}
+
+// ── pick mode ──
+function enterPickMode(){
+  closeClearMenuOnce();
+  const real = stories.filter(s => s.serverId);
+  if(!real.length){ toast('Nothing on the wire to delete','i'); return; }
+  pickMode = true;
+  picked.clear();
+  document.getElementById('pickBar').style.display = 'flex';
+  document.getElementById('pickAll').checked = false;
+  renderBlotter();
+  updatePickCount();
+}
+
+function exitPickMode(){
+  pickMode = false;
+  picked.clear();
+  const bar=document.getElementById('pickBar'); if(bar) bar.style.display='none';
+  renderBlotter();
+}
+
+function updatePickCount(){
+  const n = picked.size;
+  const count=document.getElementById('pickCount');
+  const btn=document.getElementById('pickDelete');
+  if(count) count.textContent = n ? (n + ' release' + (n===1?'':'s') + ' selected') : 'none selected';
+  if(btn){ btn.disabled = n === 0; btn.textContent = n ? ('Delete ' + n) : 'Delete'; }
+}
+
+// Updates the row in place. Re-rendering the whole blotter on each tick
+// destroys the checkbox the user is mid-way through clicking — tick two boxes
+// quickly and the second click lands on a detached element and is lost. It
+// also threw away scroll position on a long list.
+function paintPick(serverId){
+  const localId = serverIdToLocal.get(serverId);
+  const tr = localId ? document.querySelector('#blotterBody tr[data-id="' + localId + '"]') : null;
+  if(!tr) return;
+  const on = picked.has(serverId);
+  tr.classList.toggle('picked', on);
+  const cb = tr.querySelector('[data-pick-id]');
+  if(cb && cb.checked !== on) cb.checked = on;
+}
+
+function togglePick(serverId){
+  if(!serverId) return;
+  if(picked.has(serverId)) picked.delete(serverId); else picked.add(serverId);
+  paintPick(serverId);
+  syncPickAllBox();
+  updatePickCount();
+}
+
+function togglePickAll(){
+  const on = document.getElementById('pickAll').checked;
+  picked.clear();
+  if(on) stories.forEach(s => { if(s.serverId) picked.add(s.serverId); });
+  stories.forEach(s => { if(s.serverId) paintPick(s.serverId); });
+  updatePickCount();
+}
+
+// Keep "Select all" honest when rows are ticked one by one.
+function syncPickAllBox(){
+  const box = document.getElementById('pickAll'); if(!box) return;
+  const total = stories.filter(s => s.serverId).length;
+  box.checked = total > 0 && picked.size === total;
+}
+
+function confirmDeletePicked(){
+  const n = picked.size;
+  if(!n) return;
+  askYesNo(
+    'Delete ' + n + ' release' + (n===1?'':'s') + ' for everyone?\n\n'
+    + 'Each one takes its published snaps with it, on every trainee’s screen. It cannot be undone.',
+    doDeletePicked
+  );
+}
+
+async function doDeletePicked(){
+  const ids=[...picked];
+  if(!ids.length) return;
+  const btn=document.getElementById('pickDelete');
+  if(btn){ btn.disabled=true; btn.textContent='Deleting…'; }
+  try{
+    await WireSync.deleteReleases(ids);
+    // Apply now rather than waiting on the broadcast — same reasoning as
+    // publishing: if realtime is down the person who clicked must still see it.
+    removeReleasesLocally(ids);
+    toast(ids.length + ' release' + (ids.length===1?'':'s') + ' deleted for everyone','s');
+  }catch(e){
+    toast('Could not delete: '+(e.message||'try again'),'r');
+  }finally{
+    exitPickMode();
+  }
+}
+
+// Drop releases from this screen, from either the delete response or the
+// broadcast. Safe to run twice.
+function removeReleasesLocally(ids){
+  const kill = new Set(ids);
+  const goingIds = stories.filter(s => s.serverId && kill.has(s.serverId)).map(s => s.id);
+  if(!goingIds.length) return;
+  stories = stories.filter(s => !goingIds.includes(s.id));
+  goingIds.forEach(id => {
+    const s = storyById[id];
+    if(s && s.serverId) serverIdToLocal.delete(s.serverId);
+    delete storyById[id];
+  });
+  if(goingIds.includes(selectedId)){
+    selectedId = null;
+    document.getElementById('readerHeadline').innerHTML = 'Select a release';
+    document.getElementById('readerSub').innerHTML = '';
+    document.getElementById('readerBody').innerHTML =
+      '<div class="reader-placeholder">That release was deleted. Pick another from the list.</div>';
+    renderCoverFlag(null);
+    renderPubHistory(); renderActivity();
+    renderCorrectPanel(); renderWithdrawPanel();
+  }
+  renderBlotter();
 }
 
 async function doClearAllReleases(){
@@ -1163,7 +1385,13 @@ function renderBlotter(){
     const pill = s.isBundle
       ? '<span class="b-emb'+(s.bundleStatus==='queued'?' pending':'')+'">'+(s.bundleStatus==='queued'?'PENDING':'EMBARGO')+'</span>'
       : '';
-    h+='<tr class="'+cls.trim()+'" data-id="'+s.id+'">'
+    const isPicked = pickMode && s.serverId && picked.has(s.serverId);
+    h+='<tr class="'+(cls+(pickMode?'picking ':'')+(isPicked?'picked ':'')).trim()+'" data-id="'+s.id+'">'
+      +(pickMode
+        ? '<td class="b-pick">'+(s.serverId
+            ? '<input type="checkbox" data-pick-id="'+esc(s.serverId)+'"'+(isPicked?' checked':'')+'>'
+            : '')+'</td>'
+        : '')
       +'<td class="b-time">'+esc(s.timeDisplay)+'</td>'
       +'<td class="b-id">'+s.id+'</td>'
       +'<td class="b-head" title="'+esc(s.title)+'">'+pill+(s.covered?'<span class="b-cov" title="Flagged as fully covered">⚑</span> ':'')+esc(s.title)+'</td>'
@@ -1171,7 +1399,23 @@ function renderBlotter(){
       +'</tr>';
   });
   body.innerHTML=h;
-  body.querySelectorAll('tr[data-id]').forEach(tr=>tr.addEventListener('click',()=>selectStory(parseInt(tr.dataset.id,10))));
+  // The header gains a column while picking, or it stops lining up with the rows.
+  const head=document.querySelector('#blotter thead tr');
+  if(head){
+    const existing=head.querySelector('th.c-pick');
+    if(pickMode && !existing){ const th=document.createElement('th'); th.className='c-pick'; head.insertBefore(th, head.firstChild); }
+    if(!pickMode && existing) existing.remove();
+  }
+  // While picking, a row click toggles its tick instead of opening the release.
+  body.querySelectorAll('tr[data-id]').forEach(tr=>tr.addEventListener('click',(e)=>{
+    if(pickMode){
+      const s=storyById[parseInt(tr.dataset.id,10)];
+      if(s && s.serverId && e.target.tagName!=='INPUT') togglePick(s.serverId);
+      return;
+    }
+    selectStory(parseInt(tr.dataset.id,10));
+  }));
+  body.querySelectorAll('[data-pick-id]').forEach(cb=>cb.addEventListener('change',()=>togglePick(cb.dataset.pickId)));
 }
 
 // ═══ SELECT + READER ═══

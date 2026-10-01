@@ -37,6 +37,16 @@ const LIMITS = {
   CODE_MAX_ATTEMPTS:      8,                    // wrong guesses per email before lockout
   CODE_LOCKOUT_MS:        15 * 60 * 1000,      // how long that address is frozen out
   CODE_ATTEMPT_WINDOW_MS: 60 * 60 * 1000,      // attempts older than this are forgotten
+
+  // The master code is now a one-time registration gate: from the second
+  // sign-in it is email + MPIN and nothing else. That makes a 6-digit MPIN the
+  // entire door, and @thomsonreuters.com addresses are easy to guess, so an
+  // unthrottled login is a million guesses an attacker can simply work
+  // through. These are deliberately loose — a trainee fumbling their PIN in a
+  // session must not get locked out — but they turn minutes into weeks.
+  MPIN_MAX_ATTEMPTS:      10,                   // wrong MPINs per email before lockout
+  MPIN_LOCKOUT_MS:        10 * 60 * 1000,      // freeze on that address
+  MPIN_ATTEMPT_WINDOW_MS: 30 * 60 * 1000,      // attempts older than this are forgotten
   SESSION_TTL_MS:         12 * 60 * 60 * 1000, // login session valid 12 hours
   REG_TOKEN_TTL_MS:       10 * 60 * 1000,      // window to set/enter MPIN after the master code
   MPIN_MIN_LEN:           6,                    // locked to exactly 6 digits

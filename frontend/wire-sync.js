@@ -29,6 +29,7 @@ const WireSync = (() => {
   let onPublish = null;      // (entry)      => void
   let onFlag = null;         // ({chain,rowKey,wrong,flaggedBy}) => void
   let onClear = null;        // ()           => void
+  let onDelete = null;       // ({ids})      => void
   let onStatus = null;       // ('connecting'|'live'|'offline'|'error') => void
 
   let started = false;
@@ -57,6 +58,7 @@ const WireSync = (() => {
     onReleases = handlers.onReleases; onRelease = handlers.onRelease;
     onPublish = handlers.onPublish;   onFlag = handlers.onFlag;
     onClear = handlers.onClear;       onStatus = handlers.onStatus;
+    onDelete = handlers.onDelete;
 
     if (started) return;
     started = true;
@@ -66,6 +68,7 @@ const WireSync = (() => {
       .on('publish', (p) => onPublish?.(p))
       .on('flag', (p) => onFlag?.(p))
       .on('clear', () => onClear?.())
+      .on('delete', (p) => onDelete?.(p))
       .onStatus((s) => onStatus?.(s))
       // Fired after a reconnect: anything broadcast while the socket was down
       // was missed, so the whole snapshot is pulled again rather than guessed.
@@ -97,8 +100,9 @@ const WireSync = (() => {
   const publish = (chain, alert, releaseId, auto) => WireClient.publishAlert(chain, alert, releaseId, !!auto);
   const flag = (chain, rowKey, wrong) => WireClient.flagAlert(chain, rowKey, wrong);
   const clearWire = () => WireClient.clearWire();
+  const deleteReleases = (ids) => WireClient.deleteReleases(ids);
 
-  return { loadState, start, stop, inject, publish, flag, clearWire };
+  return { loadState, start, stop, inject, publish, flag, clearWire, deleteReleases };
 })();
 
 if (typeof window !== 'undefined') window.WireSync = WireSync;

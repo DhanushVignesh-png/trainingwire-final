@@ -1,21 +1,23 @@
 // Training Wire — Auth gate
 //
-// Three screens: email + username, then the master code, then the MPIN. The
-// username is the author name on every snap this person files, so it is
-// captured once at sign-in rather than typed into the toolbar each session.
+// THE NORMAL PATH IS ONE SCREEN: email + MPIN. The master code is a one-time
+// registration gate, not a per-session password, so it appears exactly twice
+// in an account's life — when registering, and again only if the MPIN has
+// been forgotten.
 //
-// EVERY DECISION HERE IS THE SERVER'S. This file validates shapes so the user
-// gets instant feedback on a typo, but it never decides whether a code or an
-// MPIN is correct — code-verify, mpin-set, mpin-login and mpin-reset do, and
-// the MPIN is PBKDF2-hashed in Table Storage where the browser cannot reach
-// it. The earlier local build checked both in the browser, which meant anyone
-// with devtools could walk straight in.
+//   sign in     email + MPIN                        -> mpin-login
+//   register    email + username -> code -> MPIN    -> code-verify, mpin-set
+//   forgot      email -> code -> new MPIN           -> code-verify, mpin-reset
 //
-// WHY THE MASTER CODE EVERY TIME: mpin-set, mpin-login and mpin-reset all
-// require a REG token, and only code-verify issues one. So the code is not a
-// one-off registration step — it is the gate on every new session. The MPIN
-// is what says which person you are once through it. A still-valid session
-// token short-circuits all of this (see restore()).
+// The username is captured once at registration and stored server-side; it is
+// the author name on every snap, and it comes back on the session rather than
+// being retyped or trusted from the client.
+//
+// EVERY DECISION HERE IS THE SERVER'S. This file validates shapes so a typo
+// gets instant feedback, but it never decides whether a code or an MPIN is
+// correct — the endpoints do, against a PBKDF2 hash the browser cannot reach.
+// An earlier build checked both in the browser, which meant anyone who opened
+// devtools could walk straight in.
 console.log('Training Wire: Auth gate loaded');
 
 const Auth = (() => {
@@ -29,7 +31,7 @@ const Auth = (() => {
 
   let email = '';
   let username = '';
-  let mpinMode = 'set';                  // 'set' | 'login' | 'reset'
+  let gatePurpose = 'register';          // 'register' | 'reset' — why we are at the code step
   let signedIn = false;
   let busy = false;
   let onSignedIn = null;
@@ -53,11 +55,12 @@ const Auth = (() => {
   }
 
   // ── screens ───────────────────────────────────────────────────────────────
-  const STEPS = ['authRegister', 'authCode', 'authMpin'];
+  const STEPS = ['authSignin', 'authRegister', 'authCode', 'authMpin'];
   const SUBS = {
-    authRegister: 'Sign in with your Thomson Reuters email',
+    authSignin: 'Sign in with your Thomson Reuters email and MPIN',
+    authRegister: 'First time here — register your email',
     authCode: 'Enter the master code you were given',
-    authMpin: 'Your 6-digit MPIN'
+    authMpin: 'Choose a 6-digit MPIN'
   };
 
   function show(step) {
@@ -69,7 +72,7 @@ const Auth = (() => {
   }
 
   function clearErrors() {
-    ['authRegErr', 'authCodeErr', 'authMpinErr'].forEach(id => { const e = $(id); if (e) e.textContent = ''; });
+    ['authSigninErr', 'authRegErr', 'authCodeErr', 'authMpinErr'].forEach(id => { const e = $(id); if (e) e.textContent = ''; });
   }
   function err(id, msg) { const e = $(id); if (e) e.textContent = msg || ''; }
 
@@ -82,35 +85,65 @@ const Auth = (() => {
     }
   }
 
-  function showCodeStep() {
+  function showSigninStep() {
+    show('authSignin');
+    const e = $('authEmailIn'); if (e) e.value = email;
+    const p = $('authPinIn'); if (p) p.value = '';
+    if (email) setTimeout(() => $('authPinIn')?.focus(), 60);   // email remembered: straight to the PIN
+  }
+
+  function showCodeStep(purpose) {
+    gatePurpose = purpose;
     show('authCode');
     const note = $('authCodeNote');
-    if (note) note.textContent = 'Signing in as ' + email + '.';
+    if (note) {
+      note.textContent = purpose === 'reset'
+        ? 'Enter the master code to set a new MPIN for ' + email + '.'
+        : 'Enter the master code you were given with your training. This is only needed once.';
+    }
     const c = $('authCodeIn'); if (c) c.value = '';
   }
 
-  function showMpinStep(mode) {
-    mpinMode = mode;
+  function showMpinStep() {
     show('authMpin');
-    const two = mode !== 'login';                       // set and reset both confirm
-    $('authMpinConfirmWrap')?.classList.toggle('hid', !two);
     const note = $('authMpinNote');
     if (note) {
-      note.textContent =
-        mode === 'set'   ? 'Choose a 6-digit MPIN. You will use it to sign in from now on.' :
-        mode === 'reset' ? 'Choose a new 6-digit MPIN. This replaces your old one.' :
-                           'Enter your 6-digit MPIN.';
+      note.textContent = gatePurpose === 'reset'
+        ? 'Choose a new 6-digit MPIN. This replaces your old one.'
+        : 'Choose a 6-digit MPIN. From now on you sign in with just your email and this MPIN.';
     }
     const btn = $('authMpinGo');
-    if (btn) btn.textContent = mode === 'set' ? 'Set MPIN' : mode === 'reset' ? 'Reset MPIN' : 'Sign in';
-    // Forgot only makes sense for someone who has one to forget.
-    $('authForgot')?.classList.toggle('hid', mode !== 'login');
+    if (btn) btn.textContent = gatePurpose === 'reset' ? 'Reset MPIN' : 'Set MPIN';
     ['authMpin1', 'authMpin2'].forEach(id => { const e = $(id); if (e) e.value = ''; });
   }
 
   // ── actions ───────────────────────────────────────────────────────────────
-  // No network call: there is nothing to send. Validate and move on.
-  function doIdentify() {
+  // The normal path: email + MPIN straight to a session.
+  async function doSignin() {
+    if (busy) return;
+    const e = val('authEmailIn').toLowerCase();
+    const pin = val('authPinIn');
+    clearErrors();
+    const ee = emailError(e); if (ee) { err('authSigninErr', ee); $('authEmailIn')?.focus(); return; }
+    if (!MPIN_RE.test(pin)) { err('authSigninErr', 'Enter your 6-digit MPIN.'); $('authPinIn')?.focus(); return; }
+
+    setBusy(true);
+    try {
+      const res = await WireClient.loginMpin(e, pin);
+      email = e;
+      if (res && res.name) username = res.name;
+      rememberIdentity();
+      enter();
+    } catch (e2) {
+      err('authSigninErr', e2.message || 'That email and MPIN do not match.');
+      const p = $('authPinIn'); if (p) { p.value = ''; p.focus(); }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Registration, step one. No network call — nothing to send until the code.
+  function doRegisterIdentify() {
     if (busy) return;
     const e = val('authEmail').toLowerCase();
     const n = val('authUser');
@@ -119,7 +152,7 @@ const Auth = (() => {
     const ue = usernameError(n); if (ue) { err('authRegErr', ue); $('authUser')?.focus(); return; }
     email = e; username = n;
     rememberIdentity();
-    showCodeStep();
+    showCodeStep('register');
   }
 
   async function doVerifyCode() {
@@ -133,7 +166,16 @@ const Auth = (() => {
       const res = await WireClient.verifyCode(email, code, username);
       // The name on file wins — someone cannot rename themselves by retyping.
       if (res && res.name) { username = res.name; rememberIdentity(); }
-      showMpinStep(res && res.hasMpin ? 'login' : 'set');
+
+      // Registering an email that already has an MPIN is not registration, it
+      // is a sign-in. Say so rather than pushing them through a reset they did
+      // not ask for and quietly replacing a PIN they may still know.
+      if (gatePurpose === 'register' && res && res.hasMpin) {
+        showSigninStep();
+        err('authSigninErr', 'That email is already registered. Sign in with your MPIN, or use "Forgot MPIN?" if you cannot remember it.');
+        return;
+      }
+      showMpinStep();
     } catch (e2) {
       err('authCodeErr', e2.message || 'That master code was not accepted.');
       const c = $('authCodeIn'); if (c) { c.value = ''; c.focus(); }
@@ -147,21 +189,20 @@ const Auth = (() => {
     const a = val('authMpin1'), b = val('authMpin2');
     clearErrors();
     if (!MPIN_RE.test(a)) { err('authMpinErr', 'MPIN must be exactly 6 digits.'); $('authMpin1')?.focus(); return; }
-    if (mpinMode !== 'login' && a !== b) { err('authMpinErr', 'The two MPINs do not match.'); $('authMpin2')?.focus(); return; }
+    if (a !== b) { err('authMpinErr', 'The two MPINs do not match.'); $('authMpin2')?.focus(); return; }
 
     setBusy(true);
     try {
-      if (mpinMode === 'set') await WireClient.setMpin(a);
-      else if (mpinMode === 'reset') await WireClient.resetMpin(a);
-      else await WireClient.loginMpin(a);
+      if (gatePurpose === 'reset') await WireClient.resetMpin(a);
+      else await WireClient.setMpin(a);
       enter();
     } catch (e2) {
       ['authMpin1', 'authMpin2'].forEach(id => { const e3 = $(id); if (e3) e3.value = ''; });
-      // Only a genuinely dead reg token sends you back to the master code. A
-      // wrong MPIN keeps you here — and the message is set AFTER any step
-      // change, because showing a step clears the error boxes.
+      // Only a genuinely dead reg token sends you back to the master code. The
+      // message is set AFTER the step change, because showing a step clears
+      // the error boxes.
       if (e2 && e2.code === 'REG_EXPIRED') {
-        showCodeStep();
+        showCodeStep(gatePurpose);
         err('authCodeErr', e2.message || 'That took too long. Enter the master code again.');
       } else {
         err('authMpinErr', e2.message || 'That did not work. Try again.');
@@ -172,14 +213,20 @@ const Auth = (() => {
     }
   }
 
+  // Forgotten MPIN: the master code is the only safe way back in, which is why
+  // it is kept rather than retired along with per-session use.
   function doForgot() {
-    // The reg token from code-verify is still live, so no extra gate is needed.
-    showMpinStep('reset');
+    const e = val('authEmailIn').toLowerCase() || email;
+    const ee = emailError(e);
+    if (ee) { err('authSigninErr', 'Enter your email first, then use "Forgot MPIN?".'); $('authEmailIn')?.focus(); return; }
+    email = e;
+    rememberIdentity();
+    showCodeStep('reset');
   }
 
-  function doBackToIdentify() {
+  function doShowRegister() {
     show('authRegister');
-    const e = $('authEmail'); if (e) e.value = email;
+    const e = $('authEmail'); if (e) e.value = val('authEmailIn').toLowerCase() || email;
     const u = $('authUser'); if (u) u.value = username;
   }
 
@@ -211,7 +258,14 @@ const Auth = (() => {
     WireClient.clearTokens();
     const app = $('app-root'); if (app) app.hidden = true;
     const gate = $('authGate'); if (gate) gate.style.display = 'grid';
-    doBackToIdentify();
+    showSigninStep();
+  }
+
+  // Settings changed the name, or the MPIN change issued a fresh token.
+  function setUsername(name){
+    if (!name) return;
+    username = name;
+    rememberIdentity();
   }
 
   // ── wiring ────────────────────────────────────────────────────────────────
@@ -228,37 +282,42 @@ const Auth = (() => {
   function init(opts) {
     onSignedIn = opts?.onSignedIn || null;
 
-    ['authCodeIn', 'authMpin1', 'authMpin2'].forEach(digitsOnly);
+    ['authPinIn', 'authCodeIn', 'authMpin1', 'authMpin2'].forEach(digitsOnly);
 
-    click('authRegisterGo', doIdentify);
-    onEnter('authEmail', doIdentify);
-    onEnter('authUser', doIdentify);
+    click('authSigninGo', doSignin);
+    onEnter('authEmailIn', () => $('authPinIn')?.focus());
+    onEnter('authPinIn', doSignin);
+    click('authNeedRegister', doShowRegister);
+    click('authForgot', doForgot);
+
+    click('authRegisterGo', doRegisterIdentify);
+    onEnter('authEmail', () => $('authUser')?.focus());
+    onEnter('authUser', doRegisterIdentify);
+    click('authRegisterBack', showSigninStep);
 
     click('authVerifyCode', doVerifyCode);
     onEnter('authCodeIn', doVerifyCode);
-    click('authCodeBack', doBackToIdentify);
+    click('authCodeBack', showSigninStep);
 
     click('authMpinGo', doMpin);
-    onEnter('authMpin1', () => { if (mpinMode === 'login') doMpin(); else $('authMpin2')?.focus(); });
+    onEnter('authMpin1', () => $('authMpin2')?.focus());
     onEnter('authMpin2', doMpin);
-    click('authForgot', doForgot);
 
     restore();
   }
 
-  // A session token that is still alive means straight in — no code, no MPIN.
-  // It lives in sessionStorage, so closing the tab ends it.
+  // A session token that is still alive means straight in. It lives in
+  // sessionStorage, so closing the tab ends it.
   function restore() {
     recallIdentity();
     if (WireClient.hasSession()) { enter(); return; }
-    const e = $('authEmail'); if (e) e.value = email;
-    const u = $('authUser'); if (u) u.value = username;
-    show('authRegister');
+    showSigninStep();
   }
 
   return {
     init,
     signOut,
+    setUsername,
     isSignedIn: () => signedIn,
     current: () => (signedIn ? publicAccount() : null)
   };

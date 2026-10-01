@@ -16,7 +16,21 @@
       <div class="auth-brand">◧ TRAINING WIRE</div>
       <div class="auth-sub" id="authSub"></div>
 
-      <!-- Step 1: who are you -->
+      <!-- The normal path: email + MPIN, one screen -->
+      <div class="auth-step on" id="authSignin">
+        <label class="auth-lbl" for="authEmailIn">Thomson Reuters email</label>
+        <input type="email" id="authEmailIn" class="auth-in" placeholder="first.last@thomsonreuters.com" autocomplete="username" spellcheck="false">
+        <label class="auth-lbl" for="authPinIn">MPIN</label>
+        <input type="password" id="authPinIn" class="auth-in code" maxlength="6" inputmode="numeric" placeholder="------" autocomplete="current-password">
+        <div class="auth-err" id="authSigninErr"></div>
+        <button class="auth-btn" id="authSigninGo">Sign in</button>
+        <div class="auth-links">
+          <button class="auth-link" id="authNeedRegister">First time here?</button>
+          <button class="auth-link" id="authForgot">Forgot MPIN?</button>
+        </div>
+      </div>
+
+      <!-- Registration, step one: email + the username that signs your snaps -->
       <div class="auth-step" id="authRegister">
         <label class="auth-lbl" for="authEmail">Thomson Reuters email</label>
         <input type="email" id="authEmail" class="auth-in" placeholder="first.last@thomsonreuters.com" autocomplete="username" spellcheck="false">
@@ -24,9 +38,12 @@
         <input type="text" id="authUser" class="auth-in" placeholder="Dhanush" autocomplete="off" spellcheck="false">
         <div class="auth-err" id="authRegErr"></div>
         <button class="auth-btn" id="authRegisterGo">Continue</button>
+        <div class="auth-links">
+          <button class="auth-link" id="authRegisterBack">Back to sign in</button>
+        </div>
       </div>
 
-      <!-- Step 2: the master code -->
+      <!-- The master code: registration, or a forgotten MPIN. Nothing else. -->
       <div class="auth-step" id="authCode">
         <div class="auth-note" id="authCodeNote"></div>
         <label class="auth-lbl" for="authCodeIn">Master code</label>
@@ -34,24 +51,19 @@
         <div class="auth-err" id="authCodeErr"></div>
         <button class="auth-btn" id="authVerifyCode">Verify</button>
         <div class="auth-links">
-          <button class="auth-link" id="authCodeBack">Back</button>
+          <button class="auth-link" id="authCodeBack">Back to sign in</button>
         </div>
       </div>
 
-      <!-- Step 3: MPIN — set, enter, or reset -->
+      <!-- Set or reset the MPIN -->
       <div class="auth-step" id="authMpin">
         <div class="auth-note" id="authMpinNote"></div>
-        <label class="auth-lbl" for="authMpin1">MPIN <span class="auth-lbl-note">— 6 digits</span></label>
-        <input type="password" id="authMpin1" class="auth-in code" maxlength="6" inputmode="numeric" placeholder="------" autocomplete="current-password">
-        <div id="authMpinConfirmWrap">
-          <label class="auth-lbl" for="authMpin2">Confirm MPIN</label>
-          <input type="password" id="authMpin2" class="auth-in code" maxlength="6" inputmode="numeric" placeholder="------" autocomplete="new-password">
-        </div>
+        <label class="auth-lbl" for="authMpin1">New MPIN <span class="auth-lbl-note">— 6 digits</span></label>
+        <input type="password" id="authMpin1" class="auth-in code" maxlength="6" inputmode="numeric" placeholder="------" autocomplete="new-password">
+        <label class="auth-lbl" for="authMpin2">Confirm MPIN</label>
+        <input type="password" id="authMpin2" class="auth-in code" maxlength="6" inputmode="numeric" placeholder="------" autocomplete="new-password">
         <div class="auth-err" id="authMpinErr"></div>
-        <button class="auth-btn" id="authMpinGo">Sign in</button>
-        <div class="auth-links">
-          <button class="auth-link" id="authForgot">Forgot MPIN?</button>
-        </div>
+        <button class="auth-btn" id="authMpinGo">Set MPIN</button>
       </div>
     </div>
   </div>
@@ -88,12 +100,24 @@
             <button class="tab" data-mode="correct" title="Refile a chain with a correction">Correction</button>
             <button class="tab" data-mode="withdraw" title="Withdraw a whole chain with an advisory">Withdraw</button>
             <button class="tab" data-float="embargo" title="Build a bundle of snaps to queue or hold — opens a floating panel so the wire stays visible">Embargoes</button>
-            <button class="tab-clear" id="btnClearReleases" title="Clear the wire for everyone">✕ Clear</button>
+            <button class="tab-clear" id="btnClearReleases" title="Clear releases from the wire">✕ Clear</button>
+            <!-- Choice, not a straight wipe: clearing hits everyone. -->
+            <div class="clear-menu" id="clearMenu" style="display:none">
+              <button class="clear-opt" id="clearAll"><b>Clear all</b><span>Remove every release and its snaps, for everyone</span></button>
+              <button class="clear-opt" id="clearPick"><b>Select releases to clear</b><span>Tick the ones to remove and leave the rest</span></button>
+            </div>
           </div>
           <div class="find-wrap">
             <input type="text" id="findStory" class="find" placeholder="Find a release" />
             <span class="find-ico">⌕</span>
           </div>
+        </div>
+        <!-- Shown only while picking releases to delete -->
+        <div class="pick-bar" id="pickBar" style="display:none">
+          <label class="pick-all"><input type="checkbox" id="pickAll"> Select all</label>
+          <span class="pick-count" id="pickCount">none selected</span>
+          <button class="pick-btn ghost" id="pickCancel">Cancel</button>
+          <button class="pick-btn danger" id="pickDelete" disabled>Delete</button>
         </div>
         <div class="blotter-scroll">
           <table class="blotter" id="blotter">
@@ -259,6 +283,29 @@
             <div class="set-row">
               <label style="margin:0"><input type="checkbox" id="autoSnapToggle" checked> Auto-publish snaps on arrival</label>
             </div>
+          </div>
+
+          <div class="set-card">
+            <h3>Your account</h3>
+            <div class="set-hint">Your username is the author name on every snap you file. Changing either needs your current MPIN — the check happens on the server, so it cannot be clicked past. <b>Snaps you have already filed keep the name they went out under</b>; a published alert is a record of what happened.</div>
+            <div class="acct-who" id="acctWho"></div>
+            <label for="acctCurrentPin">Current MPIN</label>
+            <input type="password" id="acctCurrentPin" class="acct-pin" maxlength="6" inputmode="numeric" placeholder="------" autocomplete="current-password">
+            <div class="acct-grid">
+              <div>
+                <label for="acctName">New username</label>
+                <input type="text" id="acctName" placeholder="Dhanush" autocomplete="off" spellcheck="false">
+                <button class="s-btn pri" id="btnSaveName">Save username</button>
+              </div>
+              <div>
+                <label for="acctNewPin">New MPIN</label>
+                <input type="password" id="acctNewPin" class="acct-pin" maxlength="6" inputmode="numeric" placeholder="------" autocomplete="new-password">
+                <label for="acctNewPin2">Confirm new MPIN</label>
+                <input type="password" id="acctNewPin2" class="acct-pin" maxlength="6" inputmode="numeric" placeholder="------" autocomplete="new-password">
+                <button class="s-btn pri" id="btnSaveMpin">Change MPIN</button>
+              </div>
+            </div>
+            <div class="acct-msg" id="acctMsg"></div>
           </div>
 
           <div class="set-card">
