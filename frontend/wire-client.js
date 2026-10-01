@@ -94,13 +94,12 @@ async function request(path, { method = 'GET', body = null, auth = 'session' } =
 }
 
 // ── Auth endpoints ────────────────────────────────────────────────────────
-async function requestOtp(email) {
-  return request('/otp-request', { method: 'POST', body: { email }, auth: 'none' });
-}
-
-async function verifyOtp(email, otp) {
-  const data = await request('/otp-verify', { method: 'POST', body: { email, otp }, auth: 'none' });
-  // Returns { token (reg-token), hasMpin, next }
+// One shared master code replaced emailed OTPs — see api/src/functions/
+// code-verify.js for why. The two-step shape is unchanged: this returns a
+// short-lived reg token that only permits the MPIN step.
+async function verifyCode(email, code, name) {
+  const data = await request('/code-verify', { method: 'POST', body: { email, code, name }, auth: 'none' });
+  // Returns { token (reg-token), hasMpin, next, name }
   if (data && data.token) setRegToken(data.token);
   return data;
 }
@@ -161,7 +160,7 @@ async function getRelease(id) {
 window.WireClient = {
   ApiError,
   hasSession, getSessionToken, getRegToken, clearTokens,
-  requestOtp, verifyOtp, setMpin, loginMpin,
+  verifyCode, setMpin, loginMpin,
   negotiate,
   fetchArticle, injectReleases, publishAlert, flagAlert, clearWire, getState, getRelease,
 };

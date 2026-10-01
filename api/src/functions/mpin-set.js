@@ -1,8 +1,8 @@
 // FILE: api/src/functions/mpin-set.js
 // Training Wire — POST /api/mpin-set
-// First-time MPIN creation. Requires a valid REG token (from otp-verify). Refuses
-// to overwrite an existing MPIN. On success, stores the PBKDF2 hash and immediately
-// issues a full SESSION token so the user lands logged in.
+// First-time MPIN creation. Requires a valid REG token (from code-verify).
+// Refuses to overwrite an existing MPIN. On success, stores the PBKDF2 hash and
+// immediately issues a full SESSION token so the user lands logged in.
 'use strict';
 
 const { app } = require('@azure/functions');
@@ -42,17 +42,22 @@ app.http('mpin-set', {
     }
 
     // ── Store user with hashed MPIN ──
-    await tables.upsert(TABLES.USERS, {
+    // The author name comes off the REG token, not the request body, so the
+    // client cannot file snaps under a name it was never granted. code-verify
+    // already wrote the row, so merge rather than overwrite it.
+    const name = reg.name || (existing && existing.name) || '';
+    await tables.merge(TABLES.USERS, {
       partitionKey: 'user',
       rowKey: email,
       email,
+      name,
       mpinHash: hashMpin(mpin),
-      createdAt: Date.now(),
+      createdAt: (existing && existing.createdAt) || Date.now(),
       lastLoginAt: Date.now(),
     });
 
     // ── Issue full session — user is now logged in ──
-    const token = issueSession(email);
-    return json(200, { ok: true, token, email });
+    const token = issueSession(email, name);
+    return json(200, { ok: true, token, email, name });
   },
 });

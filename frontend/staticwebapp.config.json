@@ -2,8 +2,7 @@
   "$schema": "https://json.schemastore.org/staticwebapp.config.json",
   "trailingSlash": "auto",
   "routes": [
-    { "route": "/api/otp-request", "methods": ["POST"], "allowedRoles": ["anonymous"] },
-    { "route": "/api/otp-verify", "methods": ["POST"], "allowedRoles": ["anonymous"] },
+    { "route": "/api/code-verify", "methods": ["POST"], "allowedRoles": ["anonymous"] },
     { "route": "/api/*", "allowedRoles": ["anonymous"] },
     { "route": "/", "rewrite": "/index.html", "allowedRoles": ["anonymous"] },
     { "route": "/*", "allowedRoles": ["anonymous"] }

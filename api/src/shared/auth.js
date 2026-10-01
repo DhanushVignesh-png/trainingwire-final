@@ -80,32 +80,27 @@ function verifyMpin(mpin, stored) {
   }
 }
 
-// ── OTP generation + hashing (never stored plaintext) ──
-function generateOtp() {
-  const n = crypto.randomInt(0, 1000000);
-  return String(n).padStart(6, '0');
-}
-function hashOtp(otp) {
-  return crypto.createHash('sha256').update(String(otp)).digest('hex');
-}
-// Constant-time verify of an OTP against its stored hash.
-function verifyOtp(otp, storedHash) {
-  try {
-    const actual = Buffer.from(hashOtp(otp), 'hex');
-    const expected = Buffer.from(String(storedHash || ''), 'hex');
-    if (actual.length !== expected.length || expected.length === 0) return false;
-    return crypto.timingSafeEqual(actual, expected);
-  } catch (e) {
-    return false;
-  }
+// ── Master code ──
+// Compared in constant time so a timing difference cannot leak digits. The
+// value comes from configuration, never the repo, so it can be rotated in the
+// portal without a redeploy — and so it is not readable by anyone who opens
+// devtools, which is the flaw in checking it client-side.
+function verifyMasterCode(code) {
+  const supplied = Buffer.from(String(code || ''), 'utf8');
+  const expected = Buffer.from(String(ENV.MASTER_CODE || ''), 'utf8');
+  if (expected.length === 0) return false;              // unconfigured: refuse everything
+  if (supplied.length !== expected.length) return false;
+  return crypto.timingSafeEqual(supplied, expected);
 }
 
 // ── Session / reg token issuance ──
 function issueSession(email, name) {
   return signToken({ sub: email, name: name || '', typ: 'session' }, LIMITS.SESSION_TTL_MS);
 }
-function issueRegToken(email) {
-  return signToken({ sub: email, typ: 'reg' }, LIMITS.REG_TOKEN_TTL_MS);
+// Carries the author name through the MPIN step, so registration does not have
+// to trust the client to re-send it.
+function issueRegToken(email, name) {
+  return signToken({ sub: email, name: name || '', typ: 'reg' }, LIMITS.REG_TOKEN_TTL_MS);
 }
 
 // ── Header token extraction ──
@@ -163,7 +158,7 @@ function json(status, obj) {
 module.exports = {
   signToken, verifyToken,
   hashMpin, verifyMpin,
-  generateOtp, hashOtp, verifyOtp,
+  verifyMasterCode,
   issueSession, issueRegToken,
   getSession, getRegSession, json,
 };

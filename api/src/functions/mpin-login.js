@@ -1,6 +1,6 @@
 // FILE: api/src/functions/mpin-login.js
 // Training Wire — POST /api/mpin-login
-// Returning-user login. Requires a valid REG token (from otp-verify). Verifies the
+// Returning-user login. Requires a valid REG token (from code-verify). Verifies the
 // submitted 6-digit MPIN against the stored PBKDF2 hash and, on success, issues a
 // full SESSION token. No lockout/attempt-counter by design (training simulation).
 'use strict';
@@ -59,7 +59,10 @@ app.http('mpin-login', {
       context.error('mpin-login lastLogin merge failed: ' + (e && e.message));
     }
 
-    const token = issueSession(email);
-    return json(200, { ok: true, token, email });
+    // The author name rides on the session, so every published alert is
+    // attributed from the token rather than from whatever the client claims.
+    const name = user.name || reg.name || '';
+    const token = issueSession(email, name);
+    return json(200, { ok: true, token, email, name });
   },
 });
