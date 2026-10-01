@@ -21,7 +21,6 @@ app.http('publish', {
     // ── Gate: full session required ──
     const session = getSession(request);
     if (!session) return json(401, { error: 'Unauthorized.' });
-    const author = session.sub;
 
     let body;
     try { body = await request.json(); } catch (e) { return json(400, { error: 'Invalid JSON body.' }); }
@@ -30,6 +29,18 @@ app.http('publish', {
     const chain = String((body && body.chain) || '').trim();
     let alert = String((body && body.alert) || '').trim();
     const releaseId = String((body && body.releaseId) || '').trim() || null;
+
+    // The author is the display name from the session, never a value the client
+    // sends — otherwise anyone could file under a colleague's name.
+    //
+    // The one exception is the rule-based engine. A client may ask for the
+    // "Auto" label, and the server writes that literal string itself; it still
+    // records who triggered it. Without this, auto-snaps are credited to
+    // whoever injected the release and there is no way to tell engine output
+    // from a journalist's own work.
+    const wantsAuto = !!(body && body.auto);
+    const actor = session.name || session.sub;
+    const author = wantsAuto ? 'Auto' : actor;
 
     if (!chain) return json(400, { error: 'A chain is required.' });
     if (!alert) return json(400, { error: 'Alert text is required.' });
@@ -51,6 +62,7 @@ app.http('publish', {
       alert,
       releaseId,
       author,
+      triggeredBy: wantsAuto ? actor : '',   // who injected, when author is "Auto"
       wrong: false,                 // "wrong alert" flag, toggled by flag.js
       flaggedBy: '',
       flaggedAt: 0,

@@ -144,8 +144,11 @@ async function injectReleases(items) {
   return request('/inject', { method: 'POST', body: { items }, auth: 'session' });
 }
 
-async function publishAlert(chain, alert, releaseId = null) {
-  return request('/publish', { method: 'POST', body: { chain, alert, releaseId }, auth: 'session' });
+// auto:true asks the server to stamp the author as "Auto" (it writes that
+// literal itself and records who triggered it), so rule-engine output is
+// distinguishable from a journalist's own filing.
+async function publishAlert(chain, alert, releaseId = null, auto = false) {
+  return request('/publish', { method: 'POST', body: { chain, alert, releaseId, auto }, auth: 'session' });
 }
 
 async function flagAlert(chain, rowKey, wrong = null) {

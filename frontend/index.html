@@ -65,10 +65,11 @@
         <span class="tb-brand">◧ TRAINING WIRE</span>
         <span class="env-tag">SIMULATION</span>
       </div>
-      <!-- The realtime status indicator goes back here once shared state is
-           wired. Showing a permanent "connecting…" while nothing connects
-           would just be a lie. -->
-      <div class="tb-c"></div>
+      <div class="tb-c">
+        <span id="conn-status" class="conn-status conn-connecting" title="Connecting to the shared wire">
+          <span class="conn-dot"></span><span class="conn-label">connecting…</span>
+        </span>
+      </div>
       <div class="tb-r">
         <span class="tb-who" id="tbWho"></span>
         <button class="tb-btn ghost" id="btnSignOut" title="End this session and return to the sign-in screen">Sign out</button>
@@ -295,6 +296,7 @@
   <script src="release-builder.js"></script>
   <script src="release-formatter.js"></script>
   <script src="wire-realtime.js"></script>
+  <script src="wire-sync.js"></script>
   <script src="snap-engine.js"></script>
   <script src="embargo.js"></script>
   <script src="auth.js"></script>

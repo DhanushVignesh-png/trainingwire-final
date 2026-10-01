@@ -38,7 +38,10 @@ app.http('inject', {
     // ── Gate: full session required ──
     const session = getSession(request);
     if (!session) return json(401, { error: 'Unauthorized.' });
-    const author = session.sub;
+    // The display name, not the email: this is shown in Headline Activity as
+    // "who put this release on the wire", and the desk talks about people by
+    // name. Falls back to the email if a session predates names being stored.
+    const author = session.name || session.sub;
 
     let body;
     try { body = await request.json(); } catch (e) { return json(400, { error: 'Invalid JSON body.' }); }

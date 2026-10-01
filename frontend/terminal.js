@@ -351,7 +351,7 @@ document.addEventListener('DOMContentLoaded', () => {
   reflowOverlays();
   // The gate covers the whole tool until someone signs in. The username they
   // registered with is the author name on every snap they file.
-  Auth.init({ onSignedIn: (acct) => {
+  Auth.init({ onSignedIn: async (acct) => {
     snapperName = acct.username;
     renderWho(acct);
     // The tool is only now visible, so anything that needs real measurements
@@ -359,8 +359,65 @@ document.addEventListener('DOMContentLoaded', () => {
     applySavedSplit();
     reflowOverlays();
     toast('Signed in as ' + acct.username, 's');
+    await joinSharedWire();
   }});
 });
+
+// Pull the shared wire, then listen for changes. This is what makes a release
+// one person injects show up for everyone else.
+async function joinSharedWire(){
+  setConnStatus('connecting');
+  try{
+    const s = await WireSync.loadState();
+    applySnapshot(s.releases, s.history);
+    const n = (s.releases || []).length;
+    if(n) toast(n + ' release' + (n===1?'':'s') + ' on the wire', 'i');
+  }catch(e){
+    setConnStatus('offline');
+    toast('Could not load the wire: ' + (e.message || 'try reloading'), 'r');
+    return;
+  }
+
+  WireSync.start({
+    onStatus: (st) => setConnStatus(st === 'connected' || st === 'joined' ? 'live' : st),
+
+    // Somebody else injected a release.
+    onRelease: (rel) => {
+      const story = storyFromServer(rel);
+      renderBlotter();
+      toast('New release: ' + (rel.headline || '').slice(0, 60), 'i');
+      if (story.id === selectedId) renderReader(story);
+    },
+
+    // A snap was filed anywhere — including by this terminal, whose own
+    // publish already applied it. applyPublishedRow is idempotent on rowKey.
+    onPublish: (p) => applyPublishedRow(p),
+
+    onFlag: (p) => {
+      const localId = serverIdToLocal.get(p.chain);
+      const story = localId ? storyById[localId] : null;
+      if(!story) return;
+      const row = (story.chain || []).find(c => c.rowKey === p.rowKey);
+      if(!row) return;
+      row.flagged = !!p.wrong;
+      if(story.id === selectedId) renderPubHistory();
+    },
+
+    // Somebody cleared the wire for everyone.
+    onClear: () => {
+      stories = []; storyById = {}; selectedId = null; nextId = 1; serverIdToLocal.clear();
+      renderBlotter(); renderPubHistory(); renderActivity();
+      document.getElementById('readerHeadline').innerHTML = 'Select a release';
+      document.getElementById('readerSub').innerHTML = '';
+      document.getElementById('readerBody').innerHTML =
+        '<div class="reader-placeholder">The wire was cleared. Open Settings → Send Releases to inject one.</div>';
+      renderCoverFlag(null);
+      toast('The wire was cleared', 'w');
+    },
+
+    onReleases: (releases, history) => applySnapshot(releases, history)
+  });
+}
 
 function renderWho(acct){
   const el=document.getElementById('tbWho'); if(!el) return;
@@ -522,13 +579,26 @@ function syncEmbargoTab(){
 }
 
 // ═══ CLEAR ALL RELEASES ═══
+// Clearing is SHARED: it wipes the wire for every trainee, not just this
+// browser. The wording says so, because the old copy ("resets the tool") no
+// longer describes what happens.
 function clearAllReleases(){
   if(!stories.length){ toast('No releases to clear','i'); return; }
-  const ok = window.confirm(
-    'Clear ALL releases?\n\nThis removes every release AND its publish history, and resets the tool to its initial state. This cannot be undone.'
+  askYesNo(
+    'Clear the wire for everyone?\n\nThis removes every release and all published snaps for every signed-in trainee, not just on this screen. It cannot be undone.',
+    doClearAllReleases
   );
-  if(!ok) return;
+}
 
+async function doClearAllReleases(){
+  try{ await WireSync.clearWire(); }
+  catch(e){ toast('Could not clear the wire: '+(e.message||'try again'),'r'); return; }
+  resetLocalView();
+  toast('Wire cleared for everyone','s');
+}
+
+function resetLocalView(){
+  serverIdToLocal.clear();
   stories = [];
   storyById = {};
   selectedId = null;
@@ -552,7 +622,6 @@ function clearAllReleases(){
   renderActivity();
   renderCorrectPanel();
   renderWithdrawPanel();
-  toast('All releases cleared','s');
 }
 
 // ═══ AUTHOR ═══
@@ -687,7 +756,7 @@ async function sendAllReleases(){
 
   const batch=[...stagedReleases];
   stagedReleases=[];
-  let sent=0, firstNewId=null, totalSnaps=0;
+  let sent=0, firstNewServerId=null, totalSnaps=0;
 
   for(const r of batch){
     try{
@@ -728,30 +797,37 @@ async function sendAllReleases(){
       const title = r.headline || formatted.title || ReleaseBuilder.guessHeadline(formatted.text || '');
       const source = deriveSource(formatted.text || '', title);
 
-      const item = ReleaseBuilder.buildRelease({ title, bodyHtml: formatted.html, bodyText: formatted.text, link });
-      item.detectedAt=Date.now();
-      item.kind=kind;
-      item.source=source;
-      const story=addStory(item);
-      if(firstNewId===null) firstNewId=item.__id;
-      sent++;
+      // Onto the SHARED wire, not just this browser. The server broadcasts it
+      // and every terminal — including this one — adds it from that broadcast,
+      // so everybody arrives at the same state by the same path.
+      let injected=null;
+      try{
+        injected = await WireSync.inject([{
+          title, kind, source,
+          sourceUrl: link,
+          bodyHtml: formatted.html || '',
+          bodyText: formatted.text || ''
+        }]);
+      }catch(ie){ toast('Could not send to the wire: '+(ie.message||'failed'),'r'); continue; }
 
-      // Headline Activity starts here: who put this release on the wire.
-      logActivity(story, 'Entered the release onto the wire');
+      const res = (injected && injected.results && injected.results[0]) || {};
+      if(!res.ok){ toast('Release rejected: '+(res.error||'unknown reason'),'w'); continue; }
+      sent++;
+      if(firstNewServerId===null) firstNewServerId=res.id;
 
       // ── AUTO-SNAP ──
+      // Runs ONLY here, in the terminal that injected. The engine is
+      // client-side, so if every trainee's browser snapped each arriving
+      // release the same alert would be published once per person. Publishing
+      // through the API means everyone receives these as ordinary alerts.
       if(autoSnapOn){
         try{
           const result = SnapEngine.snap({ bodyText: formatted.text || '', headline: title });
-          if(result.source && (!story.source || story.source.length < 2)) story.source = result.source;
-          const snaps = result.snaps || [];
-          snaps.forEach(sn=>{
-            appendSnap(story, { author: 'Auto', text: sn.text, category: sn.category });
-            totalSnaps++;
-          });
-          if(snaps.length){
-            story.activity.unshift({ time:hms(new Date()), who:'Auto',
-              what:'Auto-snapped '+snaps.length+' alert'+(snaps.length===1?'':'s')+' on arrival' });
+          for(const sn of (result.snaps || [])){
+            // auto:true so the server stamps the author "Auto" — engine output
+            // must not be credited to whoever happened to inject the release.
+            try{ await WireSync.publish(res.id, sn.text, res.id, true); totalSnaps++; }
+            catch(pe){ console.warn('auto-snap publish failed: ' + (pe && pe.message)); }
           }
         }catch(se){ console.warn('Auto-snap failed for a release:', se); }
       }
@@ -759,11 +835,18 @@ async function sendAllReleases(){
   }
 
   renderSendReleases();
-  renderBlotter();
-  if(firstNewId!==null) selectStory(firstNewId);
   closeSettings();
   btn.disabled=false; btn.textContent=old;
-  toast(sent+' release'+(sent===1?'':'s')+' sent'+(autoSnapOn?(' · '+totalSnaps+' auto-snap'+(totalSnaps===1?'':'s')):''),'s');
+
+  // The broadcast may not have landed yet, so pull the snapshot to be certain
+  // the injector sees what was just sent rather than waiting on a socket.
+  try{
+    const s = await WireSync.loadState();
+    applySnapshot(s.releases, s.history);
+    if(firstNewServerId && serverIdToLocal.has(firstNewServerId)) selectStory(serverIdToLocal.get(firstNewServerId));
+  }catch(e){ console.warn('post-inject resync failed: ' + (e && e.message)); }
+
+  toast(sent+' release'+(sent===1?'':'s')+' sent to the wire'+(autoSnapOn?(' · '+totalSnaps+' auto-snap'+(totalSnaps===1?'':'s')):''),'s');
 }
 
 // ═══ SPLITTER ═══
@@ -875,6 +958,112 @@ function addStory(item){
   stories.unshift(story); storyById[id]=story;
   if(stories.length>1000){ const drop=stories.pop(); delete storyById[drop.id]; }
   return story;
+}
+
+// ═══ SHARED WIRE ═══
+// The server's model and this one differ in two ways worth stating plainly.
+//
+// Identity: the server keys everything by a release UUID; the blotter shows a
+// short sequential number because "#3" is what a journalist says out loud. So
+// a story carries both — `id` for display, `serverId` for every API call. The
+// server calls that UUID the "chain", which is the same thing.
+//
+// Tags: the server stores an alert as one string and has no tag column. That
+// is fine, because the tag IS part of the line — "CORRECTED - EUROCELL PLC:
+// …" — so it is read back off the text rather than stored twice and risking
+// the two disagreeing.
+const serverIdToLocal = new Map();
+
+function tagFromText(text){
+  const t = String(text || '');
+  if (/^CORRECTED\s*-\s*/i.test(t)) return 'CORRECTED';
+  if (/^RPT\s*-\s*/i.test(t)) return 'RPT';
+  return '';
+}
+
+function snapFromServer(h){
+  return {
+    author: h.author || '—',
+    time: hms(new Date(Number(h.createdAt) || Date.now())),
+    text: h.alert || '',
+    tag: tagFromText(h.alert),
+    flagged: !!h.wrong,
+    rowKey: h.rowKey || '',          // needed to flag it later
+    serverId: h.id || ''
+  };
+}
+
+// Build or update a local story from a server release.
+function storyFromServer(rel){
+  const existing = serverIdToLocal.get(rel.id);
+  if (existing && storyById[existing]){
+    const s = storyById[existing];
+    if (rel.bodyHtml) s.bodyHtml = rel.bodyHtml;
+    if (rel.bodyText) s.bodyText = rel.bodyText;
+    return s;
+  }
+  const story = addStory({
+    title: rel.headline || '(untitled release)',
+    bodyHtml: rel.bodyHtml || '',
+    bodyText: rel.bodyText || '',
+    link: rel.sourceUrl || '',
+    detectedAt: Number(rel.createdAt) || Date.now(),
+    kind: rel.kind || 'html',
+    source: rel.source || '',
+    feedId: 'TRN'
+  });
+  story.serverId = rel.id;
+  serverIdToLocal.set(rel.id, story.id);
+  // Who put it on the wire — the one piece of Headline Activity the server
+  // already knows, so it survives a reload for everyone.
+  if (rel.injectedBy) {
+    story.activity.push({ time: story.timeDisplay, who: rel.injectedBy, what: 'Entered the release onto the wire' });
+  }
+  return story;
+}
+
+// Rebuild everything from a server snapshot. Used on sign-in and after a
+// reconnect, so a terminal that was closed or offline catches up completely.
+function applySnapshot(releases, history){
+  stories = []; storyById = {}; nextId = 1; serverIdToLocal.clear();
+  const ordered = (releases || []).slice().sort((a,b) => Number(a.createdAt||0) - Number(b.createdAt||0));
+  for (const rel of ordered){
+    const story = storyFromServer(rel);
+    const chain = (history && history[rel.id]) || [];
+    // The server returns newest first; a chain is read oldest first.
+    story.chain = chain.slice().sort((a,b) => Number(a.createdAt||0) - Number(b.createdAt||0)).map(snapFromServer);
+  }
+  renderBlotter();
+  if (selectedId && storyById[selectedId]) selectStory(selectedId);
+  else { renderPubHistory(); renderActivity(); }
+}
+
+// Add an alert row to its chain, from either the publish response or the
+// broadcast. Idempotent on rowKey so the two paths cannot double it up.
+function applyPublishedRow(p){
+  if(!p || !p.chain) return;
+  const localId = serverIdToLocal.get(p.chain);
+  const story = localId ? storyById[localId] : null;
+  if(!story) return;
+  if(!Array.isArray(story.chain)) story.chain = [];
+  if(p.rowKey && story.chain.some(c => c.rowKey === p.rowKey)) return;
+  story.chain.push(snapFromServer(p));
+  if(story.id === selectedId) renderPubHistory();
+}
+
+function setConnStatus(state){
+  const el = document.getElementById('conn-status'); if (!el) return;
+  const label = el.querySelector('.conn-label');
+  const map = {
+    connecting: ['conn-connecting', 'connecting…', 'Connecting to the shared wire'],
+    live:       ['conn-live', 'live', 'Connected — releases and snaps are shared'],
+    offline:    ['conn-offline', 'offline', 'Not connected. You will not see other people’s releases until this reconnects'],
+    error:      ['conn-offline', 'offline', 'Realtime failed. Reload to try again']
+  };
+  const [cls, text, title] = map[state] || map.offline;
+  el.className = 'conn-status ' + cls;
+  if (label) label.textContent = text;
+  el.title = title;
 }
 
 // ═══ HEADLINE ACTIVITY ═══
@@ -1170,16 +1359,35 @@ function updateAeCharCount(){
   const el=document.getElementById('aeCharCount'); if(!el)return;
   const n=line.length; el.textContent=n+' chars'; el.classList.toggle('over',n>150);
 }
-function publishFromAlertEditor(){
+async function publishFromAlertEditor(){
   if(!requireName()) return;
   const s=selectedId?storyById[selectedId]:null;
   if(!s){ toast('Select a release first','w'); return; }
   if(s.isBundle){ toast('Embargo bundles are filed from the Embargoes panel','w'); return; }
   const line=aeComposed();
   if(!line){ toast('Nothing to publish — highlight text or type a snap','w'); return; }
-  appendSnap(s,{ author:snapperName, text:line });
-  logActivity(s,'Filed a snap: <span class="act-kw">'+esc(line.slice(0,70))+(line.length>70?'…':'')+'</span>');
-  toast('Published','s');
+  if(!s.serverId){ toast('That release is not on the shared wire yet','w'); return; }
+
+  const btn=document.getElementById('aePublish');
+  if(btn) btn.disabled=true;
+  try{
+    // Goes to the server; the broadcast is what puts it in the chain, here and
+    // on every other terminal.
+    const row = await WireSync.publish(s.serverId, line, s.serverId);
+    // Apply the server's own row now. Realtime may be down, and the publisher
+    // seeing nothing happen reads as the tool being broken. The broadcast echo
+    // is de-duplicated by rowKey in onPublish.
+    applyPublishedRow(row);
+    setAeToSourcePrefix();
+    // LOCAL ONLY: there is no activity endpoint yet, so this note lives in
+    // this browser and other people will not see it.
+    logActivity(s,'Filed a snap: <span class="act-kw">'+esc(line.slice(0,70))+(line.length>70?'…':'')+'</span>');
+    toast('Published to the wire','s');
+  }catch(e){
+    toast('Publish failed: '+(e.message||'try again'),'r');
+  }finally{
+    if(btn) btn.disabled=false;
+  }
 }
 
 function loadSnapIntoEditor(index){
@@ -1208,14 +1416,28 @@ function appendSnap(story, entry){
 // Kept as an alias so the auto-snap path and any future caller read naturally.
 const addToHistory = appendSnap;
 
-function toggleSnapFlag(index){
+// The wrong-snap flag IS shared — flag.js exists — so everyone sees it.
+async function toggleSnapFlag(index){
   const s=selectedId?storyById[selectedId]:null;
   if(!s || !Array.isArray(s.chain)) return;
   const entry=s.chain[index];
   if(!entry) return;
-  entry.flagged=!entry.flagged;
-  renderPubHistory();
-  toast(entry.flagged ? 'Snap flagged as wrong' : 'Flag removed', entry.flagged ? 'w' : 'i');
+  if(!s.serverId || !entry.rowKey){
+    // A locally-made snap (correction or withdrawal refile) has no server row.
+    entry.flagged=!entry.flagged;
+    renderPubHistory();
+    return;
+  }
+  const want=!entry.flagged;
+  try{
+    await WireSync.flag(s.serverId, entry.rowKey, want);
+    // The broadcast applies it; this keeps the click feeling instant.
+    entry.flagged=want;
+    renderPubHistory();
+    toast(want ? 'Flagged as wrong for everyone' : 'Flag removed', want ? 'w' : 'i');
+  }catch(e){
+    toast('Could not flag: '+(e.message||'try again'),'r');
+  }
 }
 
 // No tag chip here on purpose: the tag is part of the alert line itself
