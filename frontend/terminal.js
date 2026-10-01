@@ -379,7 +379,9 @@ async function joinSharedWire(){
   }
 
   WireSync.start({
-    onStatus: (st) => setConnStatus(st === 'connected' || st === 'joined' ? 'live' : st),
+    // Passed through raw: setConnStatus owns the mapping, so there is one
+    // place that has to agree with wire-realtime.js.
+    onStatus: (st) => setConnStatus(st),
 
     // Somebody else injected a release.
     onRelease: (rel) => {
@@ -1051,17 +1053,26 @@ function applyPublishedRow(p){
   if(story.id === selectedId) renderPubHistory();
 }
 
+// The keys here are exactly the strings wire-realtime.js emits — 'offline',
+// 'connecting', 'online', 'reconnecting'. Getting that wrong is not a cosmetic
+// bug: the first version matched on 'connected'/'joined', which are never
+// emitted, so a perfectly healthy connection fell through to the default and
+// reported "offline". An unknown status is now logged rather than quietly
+// shown as offline, so the next mismatch is findable instead of misleading.
+const CONN_STATES = {
+  online:       ['conn-live',       'live',           'Connected — releases and snaps are shared with everyone'],
+  connecting:   ['conn-connecting', 'connecting…', 'Connecting to the shared wire'],
+  reconnecting: ['conn-connecting', 'reconnecting…', 'Connection dropped — trying again'],
+  offline:      ['conn-offline',    'offline',        'Not connected. You will still see the wire when you reload, but not the moment someone files']
+};
+
 function setConnStatus(state){
   const el = document.getElementById('conn-status'); if (!el) return;
-  const label = el.querySelector('.conn-label');
-  const map = {
-    connecting: ['conn-connecting', 'connecting…', 'Connecting to the shared wire'],
-    live:       ['conn-live', 'live', 'Connected — releases and snaps are shared'],
-    offline:    ['conn-offline', 'offline', 'Not connected. You will not see other people’s releases until this reconnects'],
-    error:      ['conn-offline', 'offline', 'Realtime failed. Reload to try again']
-  };
-  const [cls, text, title] = map[state] || map.offline;
+  const known = CONN_STATES[state];
+  if (!known) console.warn('unmapped realtime status: ' + state);
+  const [cls, text, title] = known || CONN_STATES.offline;
   el.className = 'conn-status ' + cls;
+  const label = el.querySelector('.conn-label');
   if (label) label.textContent = text;
   el.title = title;
 }
