@@ -123,10 +123,154 @@ function deriveSource(bodyText, headline){
   return h.replace(/[,:;\-–—]\s*$/, '').trim();
 }
 
+// ═══ TABLES FROM PASTED TEXT ═══
+// A financial release is mostly tables, and pasting one loses every bit of
+// table markup — all that survives is the reading order of the cells. Joining
+// those lines into a paragraph, which is what this used to do, turns an income
+// statement into an unreadable wall of numbers.
+//
+// So tables are rebuilt. The only dependable signal is that a row reads "some
+// words, then a run of numbers", and that a number run followed by a word
+// means the next row has begun. That single rule covers both shapes of paste:
+// one row per line, and several rows run together on one line.
+//
+// Headers are deliberately NOT reconstructed. "Three Months Ended / July 26,
+// 2026 / July 27, 2025" is itself words-and-numbers, and guessing which date
+// sits above which column would silently mislabel figures — far worse than no
+// header at all. Those lines become full-width caption rows, so the reader
+// sees exactly what the release said and nothing is invented.
+const NUM_TOK = /^\(?[-–—]?[$£€¥]?\d[\d,]*(?:\.\d+)?\)?$/;
+const CUR_TOK = /^[$£€¥]$/;
+const UNIT_TOK = /^(?:%|pts?|bps?|bn|mln|m|k|x|¢)$/i;
+const DASH_TOK = /^(?:[—–]|-{1,2}|N\/A|n\/a|nil)$/;
+// A negative figure is written "(19,732 )" — with a space before the bracket —
+// so the closing bracket arrives as its own token. Without this it ends the
+// number run and the next figure is read as a new row's label.
+const CLOSE_TOK = /^\)+$/;
+// A table label is a line item, not a sentence. Capping its length is what
+// stops a paragraph that happens to quote two figures from being rendered as
+// a table.
+const MAX_LABEL_WORDS = 10;
+
+const isCellTok = (t) => NUM_TOK.test(t) || CUR_TOK.test(t) || UNIT_TOK.test(t) || DASH_TOK.test(t) || CLOSE_TOK.test(t);
+
+// A period header — "July 26, 2026 July 27, 2025 July 26, 2026 July 27, 2025"
+// — is words and numbers in the same shape as a data row, so the row scanner
+// happily turns it into four rows of nonsense with "26," and "2026" sitting in
+// figure columns. That is the silent mislabelling worth most avoiding: a
+// reader cannot tell a wrong figure from a right one.
+//
+// A line naming a month or a reporting period, and carrying no currency
+// symbol, is a header. It is kept whole as a caption instead of being parsed.
+// The currency test is what keeps a real money row ("Revenue $ 96,221 …")
+// out of this branch.
+const MONTH_RE = /\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/i;
+const PERIOD_RE = /\b(?:three|six|nine|twelve)\s+months\s+ended\b|\b(?:year|quarter|period|half)\s+ended\b|\bas\s+(?:at|of)\b/i;
+
+function isPeriodHeaderLine(line){
+  if (/[$£€¥]/.test(line)) return false;
+  return MONTH_RE.test(line) || PERIOD_RE.test(line);
+}
+
+// Split one physical line into logical rows.
+function rowsFromLine(line){
+  const toks = line.split(/\s+/).filter(Boolean);
+  const rows = [];
+  let cur = [], inNums = false;
+  for (const t of toks){
+    const cell = isCellTok(t);
+    if (!cell && inNums){ rows.push(cur); cur = [t]; inNums = false; }
+    else { cur.push(t); if (cell) inNums = true; }
+  }
+  if (cur.length) rows.push(cur);
+  return rows;
+}
+
+// Where the trailing run of numeric tokens starts. Everything before it is the
+// label, so a label that merely contains a digit ("Rule 2.7") stays intact.
+function numericSuffixStart(toks){
+  let i = toks.length;
+  while (i > 0 && isCellTok(toks[i - 1])) i--;
+  return i;
+}
+
+// Group the numeric run into cells: a lone currency symbol joins the number
+// after it ("$ 96,221"), a unit joins the number before it ("75.0 %").
+function groupCells(toks){
+  const cells = [];
+  let cur = '';
+  const flush = () => { if (cur) { cells.push(cur); cur = ''; } };
+  for (const t of toks){
+    if (CLOSE_TOK.test(t) && cur) { cur += t; continue; }          // "(19,732" + ")"
+    if (UNIT_TOK.test(t) && cur) { cur += ' ' + t; continue; }
+    if (CUR_TOK.test(t)) { flush(); cur = t; continue; }
+    if (CUR_TOK.test(cur)) { cur += ' ' + t; continue; }
+    flush(); cur = t;
+  }
+  flush();
+  return cells;
+}
+
+const BARE_YEAR = /^(?:19|20)\d{2}$/;
+
+function parseTextRow(toks){
+  const start = numericSuffixStart(toks);
+  let label = toks.slice(0, start).join(' ');
+  let cells = groupCells(toks.slice(start));
+
+  // "Dividends declared in July 2026 $ 6,047 $ 244" — the year belongs to the
+  // label, not to the figures. Only absorbed when the label actually ends in a
+  // month, so a genuine figure that happens to be 2000 is left alone.
+  if (cells.length > 2 && BARE_YEAR.test(cells[0]) && new RegExp(MONTH_RE.source + '\\s*,?\\s*$', 'i').test(label)) {
+    label = (label + ' ' + cells[0]).trim();
+    cells = cells.slice(1);
+  }
+
+  const words = label ? label.split(/\s+/).length : 0;
+  const isData =
+    cells.length >= 2 &&
+    // A long label means prose that happens to end in figures, not a row.
+    words <= MAX_LABEL_WORDS &&
+    // No label means no row: a bare run of figures is a header ("2026 2025
+    // 2026 2025") or a stray, and rendering it would put numbers under the
+    // wrong columns with nothing to identify them.
+    words >= 1;
+  return { label, cells, isData };
+}
+
+function textTableHtml(rows, colCount){
+  let h = '<table class="rl-table rl-table-text"><tbody>';
+  // Consecutive caption rows are merged. A heading like "Q2 Fiscal 2027
+  // Summary" gets split in two by the row scanner, because "2027" looks like
+  // the end of a number run — joining them back reads as it was written.
+  let pending = [];
+  const flushCaptions = () => {
+    const t = pending.join(' ').replace(/\s+/g, ' ').trim();
+    pending = [];
+    if (t) h += '<tr class="rl-sec"><td colspan="' + (colCount + 1) + '">' + esc(t) + '</td></tr>';
+  };
+  for (const r of rows){
+    if (!r.isData){
+      const t = [r.label, r.cells.join(' ')].filter(Boolean).join(' ').trim();
+      if (t) pending.push(t);
+      continue;
+    }
+    flushCaptions();
+    h += '<tr><td class="rl-label">' + esc(r.label) + '</td>';
+    for (let i = 0; i < colCount; i++){
+      h += '<td class="num">' + esc(r.cells[i] != null ? r.cells[i] : '') + '</td>';
+    }
+    h += '</tr>';
+  }
+  flushCaptions();                 // a trailing caption must not be dropped
+  return h + '</tbody></table>';
+}
+
 // ═══ PASTED TEXT → formatted HTML + clean plain text ═══
-// Splits pasted RNS text into paragraphs / bullets, escapes it, and returns the same
-// { title, html, text } shape the formatter produces — so the rest of the pipeline
-// (source detection, snap engine, reader) is identical for pasted and fetched releases.
+// Splits pasted RNS text into paragraphs / bullets / tables, escapes it, and returns
+// the same { title, html, text } shape the formatter produces — so the rest of the
+// pipeline (source detection, snap engine, reader) is identical for pasted and
+// fetched releases.
 function formatPastedText(raw){
   const text = String(raw || '').replace(/\r\n?/g, '\n').replace(/\u00A0/g, ' ');
   // Blank line → paragraph boundary. Single newlines inside a block are kept as breaks.
@@ -145,11 +289,27 @@ function formatPastedText(raw){
         html += '<li>' + esc(clean) + '</li>';
       }
       html += '</ul>';
-    } else {
-      // Join wrapped lines into one paragraph.
-      const para = lines.join(' ').replace(/\s+/g, ' ').trim();
-      if (para) html += '<p class="rl-p">' + esc(para) + '</p>';
+      continue;
     }
+
+    // Tabular? Rebuild it rather than flattening it into prose. Two data rows
+    // with two or more figures each is the threshold — one stray line with
+    // numbers in it is a sentence, not a table.
+    const rows = [];
+    for (const l of lines){
+      if (isPeriodHeaderLine(l)){ rows.push({ label: l, cells: [], isData: false }); continue; }
+      for (const toks of rowsFromLine(l)) rows.push(parseTextRow(toks));
+    }
+    const dataRows = rows.filter(r => r.isData);
+    const colCount = dataRows.reduce((m, r) => Math.max(m, r.cells.length), 0);
+    if (dataRows.length >= 2 && colCount >= 2){
+      html += textTableHtml(rows, colCount);
+      continue;
+    }
+
+    // Otherwise it really is prose: join the wrapped lines.
+    const para = lines.join(' ').replace(/\s+/g, ' ').trim();
+    if (para) html += '<p class="rl-p">' + esc(para) + '</p>';
   }
 
   // Plain text (normalised) for source detection, snap engine and keyword search.
@@ -543,12 +703,21 @@ async function sendAllReleases(){
         // is what makes this work at all on a hosted page: a direct fetch from
         // the page would be blocked by CORS, and it is hardened there against
         // SSRF, oversized bodies and redirect loops.
+        // The API answers { kind, contentType, text | base64, sourceUrl } and
+        // signals failure by throwing, not by a success flag. The extension's
+        // background proxy used { success, data, finalUrl } — mapping the old
+        // shape onto the new one is why every fetch reported "fetch failed".
         let resp=null;
         try{ resp=await WireClient.fetchArticle(r.url); }
         catch(fe){ toast('Skipped a URL ('+(fe.message||'fetch failed')+')','w'); continue; }
-        if(!resp || !resp.success){ toast('Skipped a URL (fetch failed'+(resp&&resp.status?' '+resp.status:'')+')','w'); continue; }
+        if(!resp || !resp.kind){ toast('Skipped a URL (nothing came back)','w'); continue; }
         try{
-          formatted = await ReleaseFormatter.format({ kind: resp.kind, data: resp.data, base64: resp.base64, url: resp.finalUrl || r.url });
+          formatted = await ReleaseFormatter.format({
+            kind: resp.kind,
+            data: resp.text,                    // HTML source
+            base64: resp.base64,                // PDF bytes
+            url: resp.sourceUrl || r.url
+          });
         }catch(fe){ toast('Skipped a URL (parse failed: '+fe.message+')','w'); continue; }
         kind = resp.kind;
         link = r.url;
