@@ -24,20 +24,33 @@ console.log('Training Wire: Wire sync loaded');
 const WireSync = (() => {
   'use strict';
 
-  let onReleases = null;     // (releases[]) => void      full snapshot
+  let onReleases = null;     // (releases[], history, extras) => void   full snapshot
   let onRelease = null;      // (release)    => void      one new arrival
   let onPublish = null;      // (entry)      => void
   let onFlag = null;         // ({chain,rowKey,wrong,flaggedBy}) => void
   let onClear = null;        // ()           => void
   let onDelete = null;       // ({ids})      => void
   let onStatus = null;       // ('connecting'|'live'|'offline'|'error') => void
+  let onCorrect = null;      // ({chain,version,newChain,by,note,at,archivedVersion})
+  let onWithdraw = null;     // ({chain,advisory,by,at,archivedVersion})
+  let onActivity = null;     // ({release,who,what,createdAt})
+  let onCover = null;        // ({release,covered,by})
+  let onEmbargo = null;      // ({sub, bundle?|id?})
 
   let started = false;
 
   // ── snapshot ────────────────────────────────────────────────────────────
+  // Now carries the newly-shared state too: archived chains, headline activity
+  // and embargo bundles, plus coverage/withdrawal folded onto each release.
   async function loadState() {
     const s = await WireClient.getState();
-    return { releases: s.releases || [], history: s.history || {} };
+    return {
+      releases: s.releases || [],
+      history: s.history || {},
+      archives: s.archives || {},
+      activity: s.activity || {},
+      embargoes: s.embargoes || [],
+    };
   }
 
   // ── realtime ────────────────────────────────────────────────────────────
@@ -59,6 +72,9 @@ const WireSync = (() => {
     onPublish = handlers.onPublish;   onFlag = handlers.onFlag;
     onClear = handlers.onClear;       onStatus = handlers.onStatus;
     onDelete = handlers.onDelete;
+    onCorrect = handlers.onCorrect;   onWithdraw = handlers.onWithdraw;
+    onActivity = handlers.onActivity; onCover = handlers.onCover;
+    onEmbargo = handlers.onEmbargo;
 
     if (started) return;
     started = true;
@@ -69,11 +85,18 @@ const WireSync = (() => {
       .on('flag', (p) => onFlag?.(p))
       .on('clear', () => onClear?.())
       .on('delete', (p) => onDelete?.(p))
+      .on('correct', (p) => onCorrect?.(p))
+      .on('withdraw', (p) => onWithdraw?.(p))
+      .on('activity', (p) => onActivity?.(p))
+      .on('cover', (p) => onCover?.(p))
+      .on('embargo', (p) => onEmbargo?.(p))
       .onStatus((s) => onStatus?.(s))
       // Fired after a reconnect: anything broadcast while the socket was down
       // was missed, so the whole snapshot is pulled again rather than guessed.
       .onResync(async () => {
-        try { const s = await loadState(); onReleases?.(s.releases, s.history); }
+        try { const s = await loadState(); onReleases?.(s.releases, s.history, {
+          archives: s.archives, activity: s.activity, embargoes: s.embargoes,
+        }); }
         catch (e) { console.warn('resync failed: ' + (e && e.message)); }
       });
 
@@ -101,8 +124,21 @@ const WireSync = (() => {
   const flag = (chain, rowKey, wrong) => WireClient.flagAlert(chain, rowKey, wrong);
   const clearWire = () => WireClient.clearWire();
   const deleteReleases = (ids) => WireClient.deleteReleases(ids);
+  const correct = (chain, snaps, note) => WireClient.fileCorrection(chain, snaps, note);
+  const withdraw = (chain, advisory) => WireClient.fileWithdrawal(chain, advisory);
+  const activity = (release, what) => WireClient.logActivity(release, what);
+  const cover = (release, covered) => WireClient.setCover(release, covered);
+  const listBundles = () => WireClient.listBundles();
+  const createBundle = (bundle) => WireClient.createBundle(bundle);
+  const publishBundle = (id) => WireClient.publishBundle(id);
+  const releaseBundle = (id) => WireClient.releaseBundle(id);
+  const discardBundle = (id) => WireClient.discardBundle(id);
 
-  return { loadState, start, stop, inject, publish, flag, clearWire, deleteReleases };
+  return {
+    loadState, start, stop, inject, publish, flag, clearWire, deleteReleases,
+    correct, withdraw, activity, cover,
+    listBundles, createBundle, publishBundle, releaseBundle, discardBundle,
+  };
 })();
 
 if (typeof window !== 'undefined') window.WireSync = WireSync;
