@@ -242,4 +242,6 @@ window.WireClient = {
   verifyCode, setMpin, loginMpin, resetMpin, changeMpin, updateName,
   negotiate,
   fetchArticle, injectReleases, publishAlert, flagAlert, clearWire, deleteReleases, getState, getRelease,
+  fileCorrection, fileWithdrawal, logActivity, setCover,
+  listBundles, createBundle, publishBundle, releaseBundle, discardBundle,
 };
