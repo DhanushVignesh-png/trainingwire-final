@@ -664,7 +664,7 @@ function confirmDeletePicked(){
   if(!n) return;
   askYesNo(
     'Delete ' + n + ' release' + (n===1?'':'s') + ' for everyone?\n\n'
-    + 'Each one takes its published snaps with it, on every trainee's screen. It cannot be undone.',
+    + 'Each one takes its published snaps with it, on every trainee\'s screen. It cannot be undone.',
     doDeletePicked
   );
 }
