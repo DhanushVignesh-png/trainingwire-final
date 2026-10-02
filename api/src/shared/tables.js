@@ -47,6 +47,39 @@ async function merge(tableName, entity) {
   return entity;
 }
 
+// Conditional merge used for "first claim wins" races (embargo time-release).
+// Reads the current row, checks a field equals an expected value, then merges
+// ONLY if the row's etag has not changed since the read. If another terminal
+// won the race first, the etag differs and this throws — the caller treats the
+// throw as "not the winner" rather than an error.
+async function mergeIfField(tableName, partitionKey, rowKey, field, expected, patch) {
+  const client = await ensureTable(tableName);
+  let current;
+  try {
+    current = await client.getEntity(partitionKey, rowKey);
+  } catch (e) {
+    if (e && e.statusCode === 404) { const err = new Error('gone'); err.notWinner = true; throw err; }
+    throw e;
+  }
+  if (String(current[field]) !== String(expected)) {
+    const err = new Error('field changed'); err.notWinner = true; throw err;
+  }
+  try {
+    await client.updateEntity(
+      Object.assign({ partitionKey, rowKey }, patch),
+      'Merge',
+      { etag: current.etag }
+    );
+  } catch (e) {
+    // 412 Precondition Failed = someone else wrote first.
+    if (e && (e.statusCode === 412 || /UpdateConditionNotSatisfied/i.test(e.message || ''))) {
+      const err = new Error('lost race'); err.notWinner = true; throw err;
+    }
+    throw e;
+  }
+  return true;
+}
+
 // Get a single entity. Returns null if it doesn't exist.
 async function get(tableName, partitionKey, rowKey) {
   const client = await ensureTable(tableName);
@@ -115,5 +148,5 @@ async function clearPartition(tableName, partitionKey) {
 }
 
 module.exports = {
-  getTable, ensureTable, upsert, merge, get, remove, list, clearPartition,
+  getTable, ensureTable, upsert, merge, mergeIfField, get, remove, list, clearPartition,
 };
