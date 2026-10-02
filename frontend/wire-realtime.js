@@ -17,7 +17,10 @@
 'use strict';
 
 (function () {
-  const EVENTS = ['release', 'publish', 'flag', 'clear'];
+  // Every broadcast type the server can send MUST be listed here, or the
+  // dispatcher silently drops it (it checks EVENTS.includes(type)). 'delete'
+  // already relied on this. The rest are the newly-shared concepts.
+  const EVENTS = ['release', 'publish', 'flag', 'clear', 'delete', 'correct', 'withdraw', 'activity', 'cover', 'embargo'];
 
   class WireRealtime {
     constructor() {
