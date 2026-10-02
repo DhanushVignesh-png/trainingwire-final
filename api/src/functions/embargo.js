@@ -182,30 +182,29 @@ app.http('embargo', {
       }
     }
 
-    // ── RELEASE (time-based clock; first claim wins) ──
+    // ── RELEASE (time-based clock; first claim wins, atomically) ──
     if (action === 'release') {
       const id = String((body && body.id) || '').trim();
       if (!id) return json(400, { error: 'A bundle id is required.' });
       try {
         const r = await tables.get(EMB_TABLE, EMB_PK, id);
         if (!r) return json(404, { error: 'That bundle was not found.' });
-        // Already claimed by another terminal — no-op, no broadcast.
         if (r.status !== 'queued') return json(200, { ok: true, claimed: false });
         if (!r.embargoAt || Number(r.embargoAt) > Date.now()) {
           return json(409, { error: 'That bundle has not reached its embargo time.' });
         }
         const now = Date.now();
-        // Conditional claim via etag: if someone else flipped it first, this
-        // throws a 412 and we treat it as "not the winner".
-        const client = (await tables.ensureTable)
-          ? null : null;
+        // Atomic claim: only flips if the row is STILL 'queued' and no other
+        // terminal has written since we read it. Anyone else loses the race
+        // and gets claimed:false with no broadcast — so exactly one "released"
+        // event is sent no matter how many browsers tick at once.
         try {
-          await tables.merge(EMB_TABLE, {
-            partitionKey: EMB_PK, rowKey: id,
+          await tables.mergeIfField(EMB_TABLE, EMB_PK, id, 'status', 'queued', {
             status: 'released', releasedAt: now,
           });
         } catch (e) {
-          return json(200, { ok: true, claimed: false });
+          if (e && e.notWinner) return json(200, { ok: true, claimed: false });
+          throw e;
         }
         const bundle = rowToBundle(Object.assign({}, r, { status: 'released', releasedAt: now }));
         await emit('release', { bundle });
