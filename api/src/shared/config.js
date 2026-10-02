@@ -67,10 +67,12 @@ const WIRE_GROUP = 'wire-all';
 
 // ── Table names (created on first use) ──
 const TABLES = {
-  USERS:    'users',    // one row per verified user (email → MPIN hash, author name)
-  ATTEMPTS: 'attempts', // master-code guess counters, per email (throttling only)
-  RELEASES: 'releases', // live session releases
-  HISTORY:  'history',  // published alerts (per-chain partitions); flags folded in
+  USERS:    'users',     // one row per verified user (email → MPIN hash, author name)
+  ATTEMPTS: 'attempts',  // master-code guess counters, per email (throttling only)
+  RELEASES: 'releases',  // live session releases (coverage + withdrawal state folded in)
+  HISTORY:  'history',   // published alerts (per-chain partitions); flags + archives folded in
+  ACTIVITY: 'activity',  // shared headline activity, partitioned per release id
+  EMBARGOES:'embargoes', // shared embargo bundles, single 'bundle' partition
 };
 
 function requireEnv(keys) {
