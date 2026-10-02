@@ -1,15 +1,11 @@
-// Training Wire — Controller v3.9
-// Paste-first release injection: paste raw RNS text (always works, fully offline)
-// OR add a static HTML/PDF URL. RNS-aware SOURCE detection (reads the company under
-// "RNS Number"). Rule-based Auto-Snap engine auto-publishes snaps as author "Auto"
-// the moment a release lands. Manual Alert Editor is the human publish path (with
-// article-stripping). Click any published snap → loads it into the Alert Editor.
-// Per-snap "wrong" flagging, Clear-all.
+// Training Wire — Controller v4.0 (shared corrections, withdrawals, activity,
+// coverage and embargo bundles)
 //
-// v3.9: the author name comes from the signed-in account (see auth.js) instead of
-// a free-text toolbar field, the snap is a single line with the source inside it
-// rather than a separate boxed field, and PDF export is gone.
-console.log('Training Wire: Controller v3.9');
+// v4.0 vs v3.9: everything that used to live only in this browser is now shared
+// through the server and broadcast, so the whole cohort sees it in real time —
+// corrections, withdrawals, the coverage flag, headline activity and embargo
+// bundles. The local-only notes are gone; each of those now has an endpoint.
+console.log('Training Wire: Controller v4.0');
 
 // ═══ STATE ═══
 let stories = [];
@@ -22,16 +18,14 @@ let highlightKeywords = [];
 let snapperName = '';
 let autoSnapOn = true;
 
-// Which list the left pane is showing, and therefore which editor the right
-// pane offers: file a snap, correct a chain, or withdraw one.
 let mode = 'live';              // 'live' | 'correct' | 'withdraw'
-let pickMode = false;           // choosing releases to delete
-let picked = new Set();         // serverIds ticked while picking
+let pickMode = false;
+let picked = new Set();
 let phTab = 'pubhist';          // 'pubhist' | 'activity'
-let showArchive = false;        // superseded chains visible in Publish History
+let showArchive = false;
 
 const MAX_RELEASES = 25;
-let stagedReleases = [];          // { mode:'url'|'paste', url?, text?, headline }
+let stagedReleases = [];
 
 const DEFAULT_HIGHLIGHT_KEYWORDS = [
   'dividend','cash','per share','offer','possible offer','firm intention','acquisition','acquire','merger',
@@ -46,8 +40,6 @@ function esc(t) { if (t == null) return ''; const d = document.createElement('di
 function bind(id, ev, fn) { const e = document.getElementById(id); if (e) e.addEventListener(ev, fn); }
 function hms(d) { return d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }); }
 function toast(msg, type='i') { const c=document.getElementById('toastContainer'); if(!c)return; const t=document.createElement('div'); t.className='toast '+type; t.textContent=msg; c.appendChild(t); setTimeout(()=>{t.style.opacity='0';t.style.transition='opacity .3s';setTimeout(()=>t.remove(),300);},3200); }
-// No getUA() here any more: URL fetching happens in the API, which sets its own
-// User-Agent. The browser never makes that request.
 
 // ═══ ARTICLE STRIPPING (manual Alert Editor ONLY — never applied to auto-snaps) ═══
 function stripArticles(text){
@@ -61,23 +53,8 @@ function stripArticles(text){
 }
 
 // ═══ SOURCE (RNS- and EDGAR-aware) ═══
-// An SEC EDGAR filing page is titled "Filing Detail", which is not a source.
-// The source is the filer, which EDGAR prints as "NAME (Filer) CIK: …" — or
-// "(Filed by)" on the acquirer side of a 13D/G, where the subject company is
-// tagged "(Subject)" instead. Preference order follows that: whoever filed it.
 const EDGAR_HINT = /\bSEC Accession No\b|\bEDGAR\b|\bFiling Detail\b/i;
 const EDGAR_ROLE = ['Filer', 'Filed by', 'Subject'];
-
-// Address words and US state codes. EDGAR prints the filer's mailing and
-// business addresses immediately before its name, and in the extracted text
-// the whole block runs together on one line:
-//
-//   Business Address 3555 FARNAM STREET OMAHA NE 68131 4023461400
-//   BERKSHIRE HATHAWAY INC (Filer) CIK: 0001067983
-//
-// So the name cannot be found by taking a fixed window of characters before
-// "(Filer)" — that swallows the address. Instead walk back word by word from
-// the marker and stop at the first thing a company name cannot contain.
 const FILER_ADDR_WORD = /^(?:address|mailing|business|street|avenue|ave|road|rd|suite|ste|floor|fl|box|drive|boulevard|blvd|lane|plaza|parkway|pkwy|po|p\.?o\.?)$/i;
 const FILER_STATE = /^(?:a[lkzr]|c[aot]|de|fl|ga|hi|i[adln]|k[sy]|la|m[adeinost]|n[cdehjmvy]|o[hkr]|pa|ri|s[cd]|t[nx]|ut|v[at]|w[aivy]|dc)$/i;
 
@@ -87,10 +64,10 @@ function filerNameBefore(tail){
   for (let i = toks.length - 1; i >= 0 && out.length < 8; i--){
     const tok = toks[i];
     const bare = tok.replace(/[.,]+$/, '');
-    if (/[()]/.test(tok)) break;                       // another marker, e.g. "(formerly X)"
-    if (/^\d[\d\-]*$/.test(bare)) break;               // ZIP, phone, street number
-    if (FILER_ADDR_WORD.test(bare)) break;             // "Business Address", "STREET"
-    if (out.length && FILER_STATE.test(bare)) break;   // "OMAHA NE" -> stop at NE
+    if (/[()]/.test(tok)) break;
+    if (/^\d[\d\-]*$/.test(bare)) break;
+    if (FILER_ADDR_WORD.test(bare)) break;
+    if (out.length && FILER_STATE.test(bare)) break;
     out.unshift(tok);
   }
   return out.join(' ').replace(/^[\-–—·|»,\s]+/, '').replace(/[,;:\s]+$/, '');
@@ -126,46 +103,15 @@ function deriveSource(bodyText, headline){
 }
 
 // ═══ TABLES FROM PASTED TEXT ═══
-// A financial release is mostly tables, and pasting one loses every bit of
-// table markup — all that survives is the reading order of the cells. Joining
-// those lines into a paragraph, which is what this used to do, turns an income
-// statement into an unreadable wall of numbers.
-//
-// So tables are rebuilt. The only dependable signal is that a row reads "some
-// words, then a run of numbers", and that a number run followed by a word
-// means the next row has begun. That single rule covers both shapes of paste:
-// one row per line, and several rows run together on one line.
-//
-// Headers are deliberately NOT reconstructed. "Three Months Ended / July 26,
-// 2026 / July 27, 2025" is itself words-and-numbers, and guessing which date
-// sits above which column would silently mislabel figures — far worse than no
-// header at all. Those lines become full-width caption rows, so the reader
-// sees exactly what the release said and nothing is invented.
 const NUM_TOK = /^\(?[-–—]?[$£€¥]?\d[\d,]*(?:\.\d+)?\)?$/;
 const CUR_TOK = /^[$£€¥]$/;
 const UNIT_TOK = /^(?:%|pts?|bps?|bn|mln|m|k|x|¢)$/i;
 const DASH_TOK = /^(?:[—–]|-{1,2}|N\/A|n\/a|nil)$/;
-// A negative figure is written "(19,732 )" — with a space before the bracket —
-// so the closing bracket arrives as its own token. Without this it ends the
-// number run and the next figure is read as a new row's label.
 const CLOSE_TOK = /^\)+$/;
-// A table label is a line item, not a sentence. Capping its length is what
-// stops a paragraph that happens to quote two figures from being rendered as
-// a table.
 const MAX_LABEL_WORDS = 10;
 
 const isCellTok = (t) => NUM_TOK.test(t) || CUR_TOK.test(t) || UNIT_TOK.test(t) || DASH_TOK.test(t) || CLOSE_TOK.test(t);
 
-// A period header — "July 26, 2026 July 27, 2025 July 26, 2026 July 27, 2025"
-// — is words and numbers in the same shape as a data row, so the row scanner
-// happily turns it into four rows of nonsense with "26," and "2026" sitting in
-// figure columns. That is the silent mislabelling worth most avoiding: a
-// reader cannot tell a wrong figure from a right one.
-//
-// A line naming a month or a reporting period, and carrying no currency
-// symbol, is a header. It is kept whole as a caption instead of being parsed.
-// The currency test is what keeps a real money row ("Revenue $ 96,221 …")
-// out of this branch.
 const MONTH_RE = /\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/i;
 const PERIOD_RE = /\b(?:three|six|nine|twelve)\s+months\s+ended\b|\b(?:year|quarter|period|half)\s+ended\b|\bas\s+(?:at|of)\b/i;
 
@@ -174,7 +120,6 @@ function isPeriodHeaderLine(line){
   return MONTH_RE.test(line) || PERIOD_RE.test(line);
 }
 
-// Split one physical line into logical rows.
 function rowsFromLine(line){
   const toks = line.split(/\s+/).filter(Boolean);
   const rows = [];
@@ -188,22 +133,18 @@ function rowsFromLine(line){
   return rows;
 }
 
-// Where the trailing run of numeric tokens starts. Everything before it is the
-// label, so a label that merely contains a digit ("Rule 2.7") stays intact.
 function numericSuffixStart(toks){
   let i = toks.length;
   while (i > 0 && isCellTok(toks[i - 1])) i--;
   return i;
 }
 
-// Group the numeric run into cells: a lone currency symbol joins the number
-// after it ("$ 96,221"), a unit joins the number before it ("75.0 %").
 function groupCells(toks){
   const cells = [];
   let cur = '';
   const flush = () => { if (cur) { cells.push(cur); cur = ''; } };
   for (const t of toks){
-    if (CLOSE_TOK.test(t) && cur) { cur += t; continue; }          // "(19,732" + ")"
+    if (CLOSE_TOK.test(t) && cur) { cur += t; continue; }
     if (UNIT_TOK.test(t) && cur) { cur += ' ' + t; continue; }
     if (CUR_TOK.test(t)) { flush(); cur = t; continue; }
     if (CUR_TOK.test(cur)) { cur += ' ' + t; continue; }
@@ -220,9 +161,6 @@ function parseTextRow(toks){
   let label = toks.slice(0, start).join(' ');
   let cells = groupCells(toks.slice(start));
 
-  // "Dividends declared in July 2026 $ 6,047 $ 244" — the year belongs to the
-  // label, not to the figures. Only absorbed when the label actually ends in a
-  // month, so a genuine figure that happens to be 2000 is left alone.
   if (cells.length > 2 && BARE_YEAR.test(cells[0]) && new RegExp(MONTH_RE.source + '\\s*,?\\s*$', 'i').test(label)) {
     label = (label + ' ' + cells[0]).trim();
     cells = cells.slice(1);
@@ -231,20 +169,13 @@ function parseTextRow(toks){
   const words = label ? label.split(/\s+/).length : 0;
   const isData =
     cells.length >= 2 &&
-    // A long label means prose that happens to end in figures, not a row.
     words <= MAX_LABEL_WORDS &&
-    // No label means no row: a bare run of figures is a header ("2026 2025
-    // 2026 2025") or a stray, and rendering it would put numbers under the
-    // wrong columns with nothing to identify them.
     words >= 1;
   return { label, cells, isData };
 }
 
 function textTableHtml(rows, colCount){
   let h = '<table class="rl-table rl-table-text"><tbody>';
-  // Consecutive caption rows are merged. A heading like "Q2 Fiscal 2027
-  // Summary" gets split in two by the row scanner, because "2027" looks like
-  // the end of a number run — joining them back reads as it was written.
   let pending = [];
   const flushCaptions = () => {
     const t = pending.join(' ').replace(/\s+/g, ' ').trim();
@@ -264,25 +195,18 @@ function textTableHtml(rows, colCount){
     }
     h += '</tr>';
   }
-  flushCaptions();                 // a trailing caption must not be dropped
+  flushCaptions();
   return h + '</tbody></table>';
 }
 
-// ═══ PASTED TEXT → formatted HTML + clean plain text ═══
-// Splits pasted RNS text into paragraphs / bullets / tables, escapes it, and returns
-// the same { title, html, text } shape the formatter produces — so the rest of the
-// pipeline (source detection, snap engine, reader) is identical for pasted and
-// fetched releases.
 function formatPastedText(raw){
   const text = String(raw || '').replace(/\r\n?/g, '\n').replace(/\u00A0/g, ' ');
-  // Blank line → paragraph boundary. Single newlines inside a block are kept as breaks.
   const blocks = text.split(/\n\s*\n+/).map(b => b.trim()).filter(Boolean);
   const isBullet = (l) => /^\s*(?:[•‣▪◦·\-–—\*]|\(?\d{1,2}[\.\)]|\([a-z]\))\s+/.test(l);
 
   let html = '';
   for (const block of blocks){
     const lines = block.split('\n').map(l => l.trim()).filter(Boolean);
-    // If most lines in the block look like bullets, render a list.
     const bulletCount = lines.filter(isBullet).length;
     if (lines.length > 1 && bulletCount >= Math.ceil(lines.length * 0.6)){
       html += '<ul class="rl-list">';
@@ -294,9 +218,6 @@ function formatPastedText(raw){
       continue;
     }
 
-    // Tabular? Rebuild it rather than flattening it into prose. Two data rows
-    // with two or more figures each is the threshold — one stray line with
-    // numbers in it is a sentence, not a table.
     const rows = [];
     for (const l of lines){
       if (isPeriodHeaderLine(l)){ rows.push({ label: l, cells: [], isData: false }); continue; }
@@ -309,19 +230,12 @@ function formatPastedText(raw){
       continue;
     }
 
-    // Otherwise it really is prose: join the wrapped lines.
     const para = lines.join(' ').replace(/\s+/g, ' ').trim();
     if (para) html += '<p class="rl-p">' + esc(para) + '</p>';
   }
 
-  // Plain text (normalised) for source detection, snap engine and keyword search.
-  // We KEEP single newlines so the RNS metadata block ("RNS Number" on its own line,
-  // company on the next line) survives — the source detector relies on that.
   const plain = text.split('\n').map(l => l.trim()).join('\n').replace(/\n{3,}/g, '\n\n').trim();
-
-  // Title guess = first meaningful line that isn't RNS boilerplate.
   const title = guessPasteTitle(plain);
-
   return { title, html, text: plain };
 }
 
@@ -348,16 +262,20 @@ document.addEventListener('DOMContentLoaded', () => {
   renderSendReleases();
   setMode('live');
   renderActivity();
-  Embargo.init({ onFile: putBundleOnWire, whoAmI: () => snapperName || '—' });
+  // Embargo bundles are shared now: every action routes through the server.
+  Embargo.init({
+    onFile: putBundleOnWire,
+    onCreate: (draft) => WireSync.createBundle(draft).then(r => r && r.bundle),
+    onPublishHeld: (id) => WireSync.publishBundle(id).then(r => r && r.bundle),
+    onDiscard: (id) => WireSync.discardBundle(id),
+    onReleaseDue: (id) => WireSync.releaseBundle(id).then(r => r && r.claimed),
+    whoAmI: () => snapperName || '—'
+  });
   window.addEventListener('resize', reflowOverlays);
   reflowOverlays();
-  // The gate covers the whole tool until someone signs in. The username they
-  // registered with is the author name on every snap they file.
   Auth.init({ onSignedIn: async (acct) => {
     snapperName = acct.username;
     renderWho(acct);
-    // The tool is only now visible, so anything that needs real measurements
-    // has to run here rather than at DOMContentLoaded.
     applySavedSplit();
     reflowOverlays();
     toast('Signed in as ' + acct.username, 's');
@@ -365,13 +283,14 @@ document.addEventListener('DOMContentLoaded', () => {
   }});
 });
 
-// Pull the shared wire, then listen for changes. This is what makes a release
-// one person injects show up for everyone else.
+// Pull the shared wire, then listen for changes.
 async function joinSharedWire(){
   setConnStatus('connecting');
   try{
     const s = await WireSync.loadState();
-    applySnapshot(s.releases, s.history);
+    applySnapshot(s.releases, s.history, {
+      archives: s.archives, activity: s.activity, embargoes: s.embargoes
+    });
     const n = (s.releases || []).length;
     if(n) toast(n + ' release' + (n===1?'':'s') + ' on the wire', 'i');
   }catch(e){
@@ -381,11 +300,8 @@ async function joinSharedWire(){
   }
 
   WireSync.start({
-    // Passed through raw: setConnStatus owns the mapping, so there is one
-    // place that has to agree with wire-realtime.js.
     onStatus: (st) => setConnStatus(st),
 
-    // Somebody else injected a release.
     onRelease: (rel) => {
       const story = storyFromServer(rel);
       renderBlotter();
@@ -393,8 +309,6 @@ async function joinSharedWire(){
       if (story.id === selectedId) renderReader(story);
     },
 
-    // A snap was filed anywhere — including by this terminal, whose own
-    // publish already applied it. applyPublishedRow is idempotent on rowKey.
     onPublish: (p) => applyPublishedRow(p),
 
     onFlag: (p) => {
@@ -407,7 +321,6 @@ async function joinSharedWire(){
       if(story.id === selectedId) renderPubHistory();
     },
 
-    // Somebody deleted specific releases.
     onDelete: (p) => {
       const ids = (p && p.ids) || [];
       const mine = ids.filter(id => serverIdToLocal.has(id));
@@ -417,7 +330,6 @@ async function joinSharedWire(){
       toast(mine.length + ' release' + (mine.length===1?'':'s') + ' deleted by ' + ((p && p.by) || 'someone'), 'w');
     },
 
-    // Somebody cleared the wire for everyone.
     onClear: () => {
       if(pickMode) exitPickMode();
       stories = []; storyById = {}; selectedId = null; nextId = 1; serverIdToLocal.clear();
@@ -430,7 +342,22 @@ async function joinSharedWire(){
       toast('The wire was cleared', 'w');
     },
 
-    onReleases: (releases, history) => applySnapshot(releases, history)
+    // ── Shared correction: someone refiled a whole chain. ──
+    onCorrect: (p) => applyCorrection(p),
+
+    // ── Shared withdrawal: someone killed a whole chain. ──
+    onWithdraw: (p) => applyWithdrawal(p),
+
+    // ── Shared headline activity: one entry against a release. ──
+    onActivity: (p) => applyActivity(p),
+
+    // ── Shared coverage flag. ──
+    onCover: (p) => applyCover(p),
+
+    // ── Shared embargo bundles. ──
+    onEmbargo: (p) => Embargo.onBroadcast(p),
+
+    onReleases: (releases, history, extras) => applySnapshot(releases, history, extras)
   });
 }
 
@@ -453,7 +380,6 @@ function initEvents() {
   bind('btnSendAll','click',sendAllReleases);
   bind('btnClearAll','click',()=>{ stagedReleases=[]; renderSendReleases(); });
 
-  // ✕ Clear opens a choice; neither option fires on its own.
   bind('btnClearReleases','click',(e)=>{ e.stopPropagation(); toggleClearMenu(); });
   bind('clearAll','click',clearAllReleases);
   bind('clearPick','click',enterPickMode);
@@ -471,8 +397,6 @@ function initEvents() {
     const k=th.dataset.sort; if(sortKey===k) sortDir=-sortDir; else {sortKey=k; sortDir=-1;} renderBlotter();
   }));
 
-  // Releases / Correction / Withdraw pick the editor. Embargoes is a floating
-  // panel instead, so the wire stays visible behind it.
   document.querySelectorAll('.tab[data-mode]').forEach(t=>t.addEventListener('click',()=>setMode(t.dataset.mode)));
   document.querySelectorAll('.tab[data-float="embargo"]').forEach(t=>t.addEventListener('click',()=>{
     if(Embargo.isOpen()) Embargo.close(); else Embargo.open();
@@ -502,9 +426,6 @@ function initEvents() {
   if(rb){
     rb.addEventListener('mouseup',captureSelection);
     rb.addEventListener('keyup',captureSelection);
-    // One click in the release body discards the staged snap. mouseup fires
-    // first, so a click that ENDS a selection still fills the editor — only a
-    // click that leaves nothing selected clears it.
     rb.addEventListener('click',()=>{
       const sel=window.getSelection ? window.getSelection() : null;
       if(sel && (sel.toString()||'').trim()) return;
@@ -518,8 +439,6 @@ function initEvents() {
 }
 
 // ═══ SETTINGS: ACCOUNT ═══
-// Both changes are gated on the current MPIN, and the gate is the server's —
-// this only clears the fields and reports what came back.
 function acctMsg(text, ok){
   const el=document.getElementById('acctMsg'); if(!el) return;
   el.textContent=text||'';
@@ -601,18 +520,10 @@ function closeAsk(){
 }
 
 // ═══ TWO-SCREEN LAYOUT ═══
-// The tool is meant to be stretched across two monitors: the releases list on
-// one screen, the release body on the other. Two things follow from that.
-//
-// 1. The useful split is the bezel between the screens, not the middle of the
-//    window. screenSeam() works out where that falls in window coordinates.
-// 2. A dialog centred on the whole window lands ON the bezel, split in half.
-//    centreOnFirstScreen() pads the overlay so it centres inside screen one.
 function screenSeam(){
   try{
     const aw = window.screen && window.screen.availWidth;
     if(!aw) return 0;
-    // Only treat it as spanning when the window is clearly wider than one screen.
     if(window.innerWidth < aw * 1.35) return 0;
     const seam = aw - (window.screenX || 0);
     return (seam > 200 && seam < window.innerWidth - 200) ? seam : 0;
@@ -632,7 +543,6 @@ function reflowOverlays(){
   });
 }
 
-// Put the divider on the screen edge, or mid-window on a single screen.
 function snapSplitToScreen(){
   const pane=document.getElementById('paneBlotter'), ws=document.getElementById('workspace');
   if(!pane||!ws) return;
@@ -668,18 +578,12 @@ function syncEmbargoTab(){
   document.querySelectorAll('.tab[data-float="embargo"]').forEach(t=>t.classList.toggle('on',Embargo.isOpen()));
 }
 
-// ═══ CLEAR ALL RELEASES ═══
 // ═══ CLEARING AND DELETING ═══
-// Both wipe things for every trainee, not just this screen, so ✕ Clear opens a
-// choice rather than firing straight away. "Clear all" is the old behaviour;
-// picking is for keeping today's releases and dropping the rest.
 function toggleClearMenu(){
   const m=document.getElementById('clearMenu'); if(!m) return;
   const open = m.style.display === 'none';
   m.style.display = open ? 'block' : 'none';
   if(open){
-    // One outside click closes it. Registered after this click finishes, or it
-    // would catch the very click that opened the menu.
     setTimeout(()=>document.addEventListener('click', closeClearMenuOnce, { once:true }), 0);
   }
 }
@@ -696,7 +600,6 @@ function clearAllReleases(){
   );
 }
 
-// ── pick mode ──
 function enterPickMode(){
   closeClearMenuOnce();
   const real = stories.filter(s => s.serverId);
@@ -724,10 +627,6 @@ function updatePickCount(){
   if(btn){ btn.disabled = n === 0; btn.textContent = n ? ('Delete ' + n) : 'Delete'; }
 }
 
-// Updates the row in place. Re-rendering the whole blotter on each tick
-// destroys the checkbox the user is mid-way through clicking — tick two boxes
-// quickly and the second click lands on a detached element and is lost. It
-// also threw away scroll position on a long list.
 function paintPick(serverId){
   const localId = serverIdToLocal.get(serverId);
   const tr = localId ? document.querySelector('#blotterBody tr[data-id="' + localId + '"]') : null;
@@ -754,7 +653,6 @@ function togglePickAll(){
   updatePickCount();
 }
 
-// Keep "Select all" honest when rows are ticked one by one.
 function syncPickAllBox(){
   const box = document.getElementById('pickAll'); if(!box) return;
   const total = stories.filter(s => s.serverId).length;
@@ -766,7 +664,7 @@ function confirmDeletePicked(){
   if(!n) return;
   askYesNo(
     'Delete ' + n + ' release' + (n===1?'':'s') + ' for everyone?\n\n'
-    + 'Each one takes its published snaps with it, on every trainee’s screen. It cannot be undone.',
+    + 'Each one takes its published snaps with it, on every trainee's screen. It cannot be undone.',
     doDeletePicked
   );
 }
@@ -778,8 +676,6 @@ async function doDeletePicked(){
   if(btn){ btn.disabled=true; btn.textContent='Deleting…'; }
   try{
     await WireSync.deleteReleases(ids);
-    // Apply now rather than waiting on the broadcast — same reasoning as
-    // publishing: if realtime is down the person who clicked must still see it.
     removeReleasesLocally(ids);
     toast(ids.length + ' release' + (ids.length===1?'':'s') + ' deleted for everyone','s');
   }catch(e){
@@ -789,8 +685,6 @@ async function doDeletePicked(){
   }
 }
 
-// Drop releases from this screen, from either the delete response or the
-// broadcast. Safe to run twice.
 function removeReleasesLocally(ids){
   const kill = new Set(ids);
   const goingIds = stories.filter(s => s.serverId && kill.has(s.serverId)).map(s => s.id);
@@ -849,8 +743,6 @@ function resetLocalView(){
 }
 
 // ═══ AUTHOR ═══
-// The author name comes from the signed-in account, so there is nothing to
-// validate at publish time beyond still being signed in.
 function requireName(){
   if(snapperName && Auth.isSignedIn()) return true;
   toast('Sign in before publishing','w');
@@ -869,19 +761,13 @@ function loadPrefs() {
   });
 }
 
-// Where the divider was left last time — on a two-screen setup that is the
-// bezel, and it should not have to be re-dragged every session.
-//
-// Applied again once the tool is revealed: #app-root starts hidden behind the
-// auth gate, and a hidden element measures zero, so clamping against the
-// workspace width while it is still hidden collapses the pane to its minimum.
 let savedSplitW = 0;
 function applySavedSplit(){
   if(!savedSplitW) return;
   const pane=document.getElementById('paneBlotter'), ws=document.getElementById('workspace');
   if(!pane||!ws) return;
   const total=ws.getBoundingClientRect().width;
-  if(total<400) return;                       // still hidden — try again on reveal
+  if(total<400) return;
   pane.style.width=Math.max(240,Math.min(savedSplitW,total-360))+'px';
   pane.style.flex='none';
 }
@@ -891,7 +777,7 @@ function saveTemplate(){
   sSet({nw_hl_keywords:highlightKeywords},()=>{toast('Keywords saved','s');if(selectedId)renderReader(storyById[selectedId]);});
 }
 
-// ═══ SEND RELEASES (paste text OR URL, up to 15) ═══
+// ═══ SEND RELEASES ═══
 function renderSendReleases(){
   const counter=document.getElementById('srCounter');
   if(counter) counter.textContent=stagedReleases.length+' / '+MAX_RELEASES+' staged';
@@ -953,7 +839,6 @@ function stageDraft(){
 
   if(stagedReleases.length>=MAX_RELEASES){ toast('Max '+MAX_RELEASES+' releases','w'); return; }
 
-  // Paste takes priority when both are filled.
   if(text){
     if(text.length < 40){ toast('That looks too short to be a release','w'); return; }
     stagedReleases.push({ mode:'paste', text, headline });
@@ -987,19 +872,10 @@ async function sendAllReleases(){
       let formatted=null, kind='html', link='';
 
       if(r.mode==='paste'){
-        // No network — format the pasted text directly.
         formatted = formatPastedText(r.text);
         kind='paste';
         link='';
       } else {
-        // URL path — fetched by the API, not the browser. The server-side proxy
-        // is what makes this work at all on a hosted page: a direct fetch from
-        // the page would be blocked by CORS, and it is hardened there against
-        // SSRF, oversized bodies and redirect loops.
-        // The API answers { kind, contentType, text | base64, sourceUrl } and
-        // signals failure by throwing, not by a success flag. The extension's
-        // background proxy used { success, data, finalUrl } — mapping the old
-        // shape onto the new one is why every fetch reported "fetch failed".
         let resp=null;
         try{ resp=await WireClient.fetchArticle(r.url); }
         catch(fe){ toast('Skipped a URL ('+(fe.message||'fetch failed')+')','w'); continue; }
@@ -1007,8 +883,8 @@ async function sendAllReleases(){
         try{
           formatted = await ReleaseFormatter.format({
             kind: resp.kind,
-            data: resp.text,                    // HTML source
-            base64: resp.base64,                // PDF bytes
+            data: resp.text,
+            base64: resp.base64,
             url: resp.sourceUrl || r.url
           });
         }catch(fe){ toast('Skipped a URL (parse failed: '+fe.message+')','w'); continue; }
@@ -1021,9 +897,6 @@ async function sendAllReleases(){
       const title = r.headline || formatted.title || ReleaseBuilder.guessHeadline(formatted.text || '');
       const source = deriveSource(formatted.text || '', title);
 
-      // Onto the SHARED wire, not just this browser. The server broadcasts it
-      // and every terminal — including this one — adds it from that broadcast,
-      // so everybody arrives at the same state by the same path.
       let injected=null;
       try{
         injected = await WireSync.inject([{
@@ -1039,17 +912,10 @@ async function sendAllReleases(){
       sent++;
       if(firstNewServerId===null) firstNewServerId=res.id;
 
-      // ── AUTO-SNAP ──
-      // Runs ONLY here, in the terminal that injected. The engine is
-      // client-side, so if every trainee's browser snapped each arriving
-      // release the same alert would be published once per person. Publishing
-      // through the API means everyone receives these as ordinary alerts.
       if(autoSnapOn){
         try{
           const result = SnapEngine.snap({ bodyText: formatted.text || '', headline: title });
           for(const sn of (result.snaps || [])){
-            // auto:true so the server stamps the author "Auto" — engine output
-            // must not be credited to whoever happened to inject the release.
             try{ await WireSync.publish(res.id, sn.text, res.id, true); totalSnaps++; }
             catch(pe){ console.warn('auto-snap publish failed: ' + (pe && pe.message)); }
           }
@@ -1062,11 +928,9 @@ async function sendAllReleases(){
   closeSettings();
   btn.disabled=false; btn.textContent=old;
 
-  // The broadcast may not have landed yet, so pull the snapshot to be certain
-  // the injector sees what was just sent rather than waiting on a socket.
   try{
     const s = await WireSync.loadState();
-    applySnapshot(s.releases, s.history);
+    applySnapshot(s.releases, s.history, { archives: s.archives, activity: s.activity, embargoes: s.embargoes });
     if(firstNewServerId && serverIdToLocal.has(firstNewServerId)) selectStory(serverIdToLocal.get(firstNewServerId));
   }catch(e){ console.warn('post-inject resync failed: ' + (e && e.message)); }
 
@@ -1088,8 +952,6 @@ function makeSplitter(id, paneId) {
   window.addEventListener('mouseup',()=>{
     if(dragging){ dragging=false; document.body.style.cursor=''; if(lastW) sSet({nw_split_w:lastW}); }
   });
-  // Double-click drops the divider on the screen edge, so each monitor gets
-  // one pane without fiddling.
   sp.addEventListener('dblclick',snapSplitToScreen);
 }
 
@@ -1167,15 +1029,10 @@ function addStory(item){
   const story={ ...item, id, status:'ready',
     timeDisplay:hms(new Date(item.detectedAt||Date.now())), detectedAt:item.detectedAt||Date.now(),
     bodyHtml:item.bodyHtml||'', bodyText:item.bodyText||'', source:item.source||'',
-    // The published snaps for this release, oldest first — a chain, not a log.
-    // Corrections and withdrawals replace the whole thing, so order matters.
     chain:[], version:1,
-    // Superseded chains, kept so the desk can still read what went out.
     archive:[],
     withdrawn:null,
-    // Who did what to this release. "entered" is logged by the caller.
     activity:[],
-    // Coverage flag: every story in this release has been snapped.
     covered:false
   };
   item.__id=id;
@@ -1185,17 +1042,6 @@ function addStory(item){
 }
 
 // ═══ SHARED WIRE ═══
-// The server's model and this one differ in two ways worth stating plainly.
-//
-// Identity: the server keys everything by a release UUID; the blotter shows a
-// short sequential number because "#3" is what a journalist says out loud. So
-// a story carries both — `id` for display, `serverId` for every API call. The
-// server calls that UUID the "chain", which is the same thing.
-//
-// Tags: the server stores an alert as one string and has no tag column. That
-// is fine, because the tag IS part of the line — "CORRECTED - EUROCELL PLC:
-// …" — so it is read back off the text rather than stored twice and risking
-// the two disagreeing.
 const serverIdToLocal = new Map();
 
 function tagFromText(text){
@@ -1210,20 +1056,21 @@ function snapFromServer(h){
     author: h.author || '—',
     time: hms(new Date(Number(h.createdAt) || Date.now())),
     text: h.alert || '',
-    tag: tagFromText(h.alert),
+    tag: h.tag || tagFromText(h.alert),
     flagged: !!h.wrong,
-    rowKey: h.rowKey || '',          // needed to flag it later
+    rowKey: h.rowKey || '',
     serverId: h.id || ''
   };
 }
 
-// Build or update a local story from a server release.
+// Build a story from a server release, carrying coverage + withdrawal state.
 function storyFromServer(rel){
   const existing = serverIdToLocal.get(rel.id);
   if (existing && storyById[existing]){
     const s = storyById[existing];
     if (rel.bodyHtml) s.bodyHtml = rel.bodyHtml;
     if (rel.bodyText) s.bodyText = rel.bodyText;
+    applyReleaseState(s, rel);
     return s;
   }
   const story = addStory({
@@ -1238,32 +1085,66 @@ function storyFromServer(rel){
   });
   story.serverId = rel.id;
   serverIdToLocal.set(rel.id, story.id);
-  // Who put it on the wire — the one piece of Headline Activity the server
-  // already knows, so it survives a reload for everyone.
-  if (rel.injectedBy) {
-    story.activity.push({ time: story.timeDisplay, who: rel.injectedBy, what: 'Entered the release onto the wire' });
-  }
+  applyReleaseState(story, rel);
   return story;
 }
 
-// Rebuild everything from a server snapshot. Used on sign-in and after a
-// reconnect, so a terminal that was closed or offline catches up completely.
-function applySnapshot(releases, history){
+// Coverage + withdrawal state the server folds onto a release row.
+function applyReleaseState(story, rel){
+  story.covered = !!rel.covered;
+  story.coveredBy = rel.coveredBy || '';
+  if (rel.withdrawn){
+    story.withdrawn = {
+      by: rel.withdrawnBy || '—',
+      time: hms(new Date(Number(rel.withdrawnAt) || Date.now())),
+      advisory: rel.withdrawnAdvisory || ''
+    };
+  }
+}
+
+// Rebuild everything from a server snapshot, including the shared extras.
+function applySnapshot(releases, history, extras){
+  const ex = extras || {};
   stories = []; storyById = {}; nextId = 1; serverIdToLocal.clear();
   const ordered = (releases || []).slice().sort((a,b) => Number(a.createdAt||0) - Number(b.createdAt||0));
   for (const rel of ordered){
     const story = storyFromServer(rel);
     const chain = (history && history[rel.id]) || [];
-    // The server returns newest first; a chain is read oldest first.
     story.chain = chain.slice().sort((a,b) => Number(a.createdAt||0) - Number(b.createdAt||0)).map(snapFromServer);
+    // Archived (superseded) chains for this release.
+    const arch = ex.archives && ex.archives[rel.id];
+    if (arch){
+      story.archive = Object.keys(arch)
+        .map(v => arch[v])
+        .sort((a,b) => Number(a.version||0) - Number(b.version||0))
+        .map(a => ({
+          v: a.version,
+          reason: a.reason,
+          by: a.by,
+          time: hms(new Date(Number(a.at) || Date.now())),
+          advisory: a.reason === 'withdrawal' ? (a.note || '') : '',
+          snaps: (a.snaps || []).slice().sort((x,y)=>Number(x.createdAt||0)-Number(y.createdAt||0)).map(snapFromServer)
+        }));
+      story.version = story.archive.length + 1;
+    }
+    // Shared headline activity for this release.
+    const acts = ex.activity && ex.activity[rel.id];
+    if (acts){
+      story.activity = acts.map(a => ({
+        time: hms(new Date(Number(a.createdAt) || Date.now())),
+        who: a.who || '—',
+        what: a.what || '',
+        id: a.id
+      }));
+    }
   }
   renderBlotter();
+  // Shared embargo bundles.
+  if (window.Embargo && Embargo.applySnapshot) Embargo.applySnapshot(ex.embargoes || []);
   if (selectedId && storyById[selectedId]) selectStory(selectedId);
   else { renderPubHistory(); renderActivity(); }
 }
 
-// Add an alert row to its chain, from either the publish response or the
-// broadcast. Idempotent on rowKey so the two paths cannot double it up.
 function applyPublishedRow(p){
   if(!p || !p.chain) return;
   const localId = serverIdToLocal.get(p.chain);
@@ -1275,12 +1156,95 @@ function applyPublishedRow(p){
   if(story.id === selectedId) renderPubHistory();
 }
 
-// The keys here are exactly the strings wire-realtime.js emits — 'offline',
-// 'connecting', 'online', 'reconnecting'. Getting that wrong is not a cosmetic
-// bug: the first version matched on 'connected'/'joined', which are never
-// emitted, so a perfectly healthy connection fell through to the default and
-// reported "offline". An unknown status is now logged rather than quietly
-// shown as offline, so the next mismatch is findable instead of misleading.
+// ── Shared correction applied from the server (own action or broadcast). ──
+// Idempotent on version: if we've already recorded this archived version, skip.
+function applyCorrection(p){
+  if(!p || !p.chain) return;
+  const localId = serverIdToLocal.get(p.chain);
+  const story = localId ? storyById[localId] : null;
+  if(!story) return;
+  if(!Array.isArray(story.archive)) story.archive = [];
+  const archivedV = Number(p.archivedVersion || 0);
+  if(archivedV && story.archive.some(a => a.v === archivedV)) {
+    // Already applied this correction.
+    return;
+  }
+  // Archive the chain we currently show as the superseded version.
+  if((story.chain || []).length){
+    story.archive.push({
+      v: archivedV || (story.version || 1),
+      reason: 'correction',
+      by: p.by || '—',
+      time: hms(new Date(Number(p.at) || Date.now())),
+      advisory: '',
+      snaps: (story.chain || []).slice()
+    });
+  }
+  story.version = Number(p.version || (story.version || 1) + 1);
+  story.chain = (p.newChain || []).map(snapFromServer);
+  story.withdrawn = null;
+  if(story.id === selectedId){ showArchive = false; renderPubHistory(); renderCorrectPanel(); }
+}
+
+// ── Shared withdrawal applied from the server. ──
+function applyWithdrawal(p){
+  if(!p || !p.chain) return;
+  const localId = serverIdToLocal.get(p.chain);
+  const story = localId ? storyById[localId] : null;
+  if(!story) return;
+  if(!Array.isArray(story.archive)) story.archive = [];
+  const archivedV = Number(p.archivedVersion || 0);
+  if(archivedV && story.archive.some(a => a.v === archivedV && a.reason === 'withdrawal')) return;
+  if((story.chain || []).length){
+    story.archive.push({
+      v: archivedV || (story.version || 1),
+      reason: 'withdrawal',
+      by: p.by || '—',
+      time: hms(new Date(Number(p.at) || Date.now())),
+      advisory: p.advisory || '',
+      snaps: (story.chain || []).slice()
+    });
+  }
+  story.version = (story.version || 1) + 1;
+  story.chain = [];
+  story.withdrawn = {
+    by: p.by || '—',
+    time: hms(new Date(Number(p.at) || Date.now())),
+    advisory: p.advisory || ''
+  };
+  if(story.id === selectedId){ showArchive = true; renderPubHistory(); renderWithdrawPanel(); }
+}
+
+// ── Shared activity entry applied from the server. ──
+function applyActivity(p){
+  if(!p || !p.release) return;
+  const localId = serverIdToLocal.get(p.release);
+  const story = localId ? storyById[localId] : null;
+  if(!story) return;
+  if(!Array.isArray(story.activity)) story.activity = [];
+  if(p.id && story.activity.some(a => a.id === p.id)) return;
+  story.activity.unshift({
+    time: hms(new Date(Number(p.createdAt) || Date.now())),
+    who: p.who || '—',
+    what: p.what || '',
+    id: p.id
+  });
+  if(story.activity.length > 300) story.activity.pop();
+  if(story.id === selectedId) renderActivity();
+}
+
+// ── Shared coverage flag applied from the server. ──
+function applyCover(p){
+  if(!p || !p.release) return;
+  const localId = serverIdToLocal.get(p.release);
+  const story = localId ? storyById[localId] : null;
+  if(!story) return;
+  story.covered = !!p.covered;
+  story.coveredBy = p.covered ? (p.by || '') : '';
+  renderBlotter();
+  if(story.id === selectedId) renderCoverFlag(story);
+}
+
 const CONN_STATES = {
   online:       ['conn-live',       'live',           'Connected — releases and snaps are shared with everyone'],
   connecting:   ['conn-connecting', 'connecting…', 'Connecting to the shared wire'],
@@ -1300,13 +1264,14 @@ function setConnStatus(state){
 }
 
 // ═══ HEADLINE ACTIVITY ═══
-// Who touched this release, so a missed snap can be traced back to someone.
+// Now SHARED: an entry is sent to the server, which stores and broadcasts it.
+// applyActivity (from our own response and from the broadcast) is what adds it
+// to the feed, so the whole cohort sees the same Headline Activity.
 function logActivity(story, what){
-  if(!story) return;
-  if(!Array.isArray(story.activity)) story.activity=[];
-  story.activity.unshift({ time:hms(new Date()), who:snapperName||'—', what:what||'' });
-  if(story.activity.length>300) story.activity.pop();
-  if(story.id===selectedId) renderActivity();
+  if(!story || !story.serverId) return;
+  WireSync.activity(story.serverId, what).catch(e => {
+    console.warn('activity log failed: ' + (e && e.message));
+  });
 }
 
 function renderActivity(){
@@ -1327,20 +1292,30 @@ function renderActivity(){
   el.innerHTML=h;
 }
 
-// ═══ COVERAGE FLAG ═══
-// Flagged = this release is fully covered. Unflag it when something was
-// missed, so it comes back into view and the reopen is on the record.
-function toggleCoverFlag(){
+// ═══ COVERAGE FLAG (shared) ═══
+async function toggleCoverFlag(){
   if(!requireName()) return;
   const s=selectedId?storyById[selectedId]:null;
   if(!s || s.isBundle) return;
-  s.covered=!s.covered;
-  logActivity(s, s.covered
-    ? '<span class="act-flag">Flagged</span> as fully covered'
-    : '<span class="act-unflag">Unflagged</span> — something was missed, release reopened');
-  renderCoverFlag(s);
-  renderBlotter();
-  toast(s.covered?'Flagged as covered':'Unflagged — release reopened', s.covered?'s':'w');
+  if(!s.serverId){ toast('That release is not on the shared wire yet','w'); return; }
+  const want = !s.covered;
+  const b=document.getElementById('btnCoverFlag'); if(b) b.disabled=true;
+  try{
+    const res = await WireSync.cover(s.serverId, want);
+    // Apply straight away; the broadcast echo is harmless (same value).
+    s.covered = !!res.covered;
+    s.coveredBy = res.by || '';
+    logActivity(s, s.covered
+      ? '<span class="act-flag">Flagged</span> as fully covered'
+      : '<span class="act-unflag">Unflagged</span> — something was missed, release reopened');
+    renderCoverFlag(s);
+    renderBlotter();
+    toast(s.covered?'Flagged as covered for everyone':'Unflagged — release reopened', s.covered?'s':'w');
+  }catch(e){
+    toast('Could not update coverage: '+(e.message||'try again'),'r');
+  }finally{
+    if(b) b.disabled=false;
+  }
 }
 
 function renderCoverFlag(s){
@@ -1350,7 +1325,7 @@ function renderCoverFlag(s){
   b.classList.toggle('on', !!s.covered);
   b.textContent = s.covered ? '⚑ Flagged' : '⚑ Flag';
   b.title = s.covered
-    ? 'Covered by ' + esc(s.activity?.find(a=>/Flagged/.test(a.what))?.who || '—') + ' — click to unflag if something was missed'
+    ? 'Covered'+(s.coveredBy?(' by '+esc(s.coveredBy)):'')+' — click to unflag if something was missed'
     : 'Mark this release as fully covered';
 }
 
@@ -1380,8 +1355,6 @@ function renderBlotter(){
     const breaking=(Date.now()-s.detectedAt)<8000;
     const cls=(s.id===selectedId?'selected ':'')+(breaking?'breaking ':'')+(s.covered?'covered ':'');
     const src = s.source || s.feedId;
-    // Bundles sit on the wire alongside real releases: PENDING until their
-    // embargo lifts, then EMBARGO.
     const pill = s.isBundle
       ? '<span class="b-emb'+(s.bundleStatus==='queued'?' pending':'')+'">'+(s.bundleStatus==='queued'?'PENDING':'EMBARGO')+'</span>'
       : '';
@@ -1399,14 +1372,12 @@ function renderBlotter(){
       +'</tr>';
   });
   body.innerHTML=h;
-  // The header gains a column while picking, or it stops lining up with the rows.
   const head=document.querySelector('#blotter thead tr');
   if(head){
     const existing=head.querySelector('th.c-pick');
     if(pickMode && !existing){ const th=document.createElement('th'); th.className='c-pick'; head.insertBefore(th, head.firstChild); }
     if(!pickMode && existing) existing.remove();
   }
-  // While picking, a row click toggles its tick instead of opening the release.
   body.querySelectorAll('tr[data-id]').forEach(tr=>tr.addEventListener('click',(e)=>{
     if(pickMode){
       const s=storyById[parseInt(tr.dataset.id,10)];
@@ -1424,8 +1395,6 @@ function selectStory(id){
   const s=storyById[id]; if(!s)return;
   renderReader(s);
   renderCoverFlag(s);
-  // An embargo bundle is not a release you snap off: no alert editor, no
-  // publish history. Its snaps are the body.
   const isB=!!s.isBundle;
   document.getElementById('dockAE').style.display = isB ? 'none' : '';
   document.getElementById('dockPH').style.display = isB ? 'none' : '';
@@ -1438,7 +1407,6 @@ function selectStory(id){
   if(mode==='withdraw') renderWithdrawPanel();
 }
 
-// Highlight keywords inside text nodes of the formatted HTML (never breaks tags).
 function highlightNode(root){
   const moneyRe=/(£\s?\d[\d,]*(?:\.\d+)?(?:\s?(?:million|billion|mln|bln|bn|m))?|\$\s?\d[\d,]*(?:\.\d+)?(?:\s?(?:million|billion|mln|bln))?|\b\d[\d,]*(?:\.\d+)?\s?(?:pence|p)\b)/gi;
   const pctRe=/(\d+(?:\.\d+)?\s?(?:%|per cent\.?|percent))/gi;
@@ -1487,7 +1455,9 @@ function renderReader(s){
     return;
   }
   if(s.bodyHtml){
-    rb.innerHTML=s.bodyHtml;
+    // Defence in depth: stored HTML goes through the read-time sanitizer.
+    try{ rb.innerHTML = ReleaseFormatter.sanitizeStored(s.bodyHtml); }
+    catch(e){ rb.innerHTML = s.bodyHtml; }
     try{ highlightNode(rb); }catch(e){}
   } else {
     rb.innerHTML='<p class="rl-p">'+esc(s.bodyText||'(No body text available.)')+'</p>';
@@ -1496,7 +1466,6 @@ function renderReader(s){
 }
 
 // ═══ EMBARGO BUNDLES ON THE WIRE ═══
-// The body of a bundle row is the snaps themselves, with their metadata.
 function bundleBodyHtml(s){
   const b=s.bundle||{};
   const when=b.kind==='time'
@@ -1528,13 +1497,16 @@ function embargoLabel(ts){
     +' '+pad(d.getHours())+':'+pad(d.getMinutes())+':'+pad(d.getSeconds());
 }
 
-// A bundle becomes a row on the Releases page: queued time-based ones land
-// immediately as PENDING, release-based ones only once published by hand.
+// A bundle becomes a row on the Releases page. Keyed by bundle.id (a server
+// UUID now), so the same bundle from a snapshot and from a broadcast is one row.
 function putBundleOnWire(bundle){
   const existing=stories.find(x=>x.isBundle && x.bundle && x.bundle.id===bundle.id);
   if(existing){
     existing.bundle=bundle;
     existing.bundleStatus=bundle.status;
+    existing.title=bundle.title;
+    existing.embargoLabel=embargoLabel(bundle.embargoAt);
+    if(bundle.status==='released' && existing.bundleStatus!=='released'){ existing.detectedAt=Date.now(); existing.timeDisplay=hms(new Date()); }
     renderBlotter();
     if(existing.id===selectedId) renderReader(existing);
     return existing;
@@ -1553,23 +1525,7 @@ function putBundleOnWire(bundle){
   return story;
 }
 
-// Fired by the embargo clock when a queued bundle's time arrives.
-window.onEmbargoReleased = function(bundle){
-  const story=stories.find(x=>x.isBundle && x.bundle && x.bundle.id===bundle.id);
-  if(!story) { putBundleOnWire(bundle); return; }
-  story.bundle=bundle;
-  story.bundleStatus='released';
-  story.detectedAt=Date.now();
-  story.timeDisplay=hms(new Date());
-  renderBlotter();
-  if(story.id===selectedId) renderReader(story);
-  toast('Embargo lifted — '+bundle.title,'s');
-};
-
 // ═══ ALERT EDITOR ═══
-// A snap is ONE line — "SOURCE: BODY". The source is part of that text, not a
-// separate field, so it can be edited, retagged ("CORRECTED - FORTERRA: …") or
-// deleted like any other words.
 function aeSourcePrefix(){
   const s=selectedId?storyById[selectedId]:null;
   const src=((s&&s.source)||'').trim().toUpperCase();
@@ -1580,8 +1536,6 @@ function setAeToSourcePrefix(){
   el.value=aeSourcePrefix();
   updateAeCharCount();
 }
-// Replace the snap text while keeping whatever source prefix is already typed,
-// so highlighting a second passage does not wipe an edited source.
 function aeSetSnapText(text){
   const el=document.getElementById('aeBody'); if(!el) return;
   const m=(el.value||'').match(/^([^:]{1,60}:\s*)/);
@@ -1597,8 +1551,6 @@ function captureSelection(){
   if(rb && sel.anchorNode && !rb.contains(sel.anchorNode)) return;
   aeSetSnapText(stripArticles(text));
 }
-// Clear and double-click both return to the bare source prefix, which is the
-// editor's working state for the selected release.
 function resetAlertEditorBody(){
   const el=document.getElementById('aeBody'); if(!el) return;
   if(el.value===aeSourcePrefix()) return;
@@ -1606,7 +1558,6 @@ function resetAlertEditorBody(){
 }
 function aeComposed(){
   const line=(document.getElementById('aeBody').value||'').trim().toUpperCase();
-  // A bare "FORTERRA:" with no snap text is nothing to publish.
   return /^[^:]{1,60}:$/.test(line) ? '' : line;
 }
 function updateAeCharCount(){
@@ -1626,16 +1577,10 @@ async function publishFromAlertEditor(){
   const btn=document.getElementById('aePublish');
   if(btn) btn.disabled=true;
   try{
-    // Goes to the server; the broadcast is what puts it in the chain, here and
-    // on every other terminal.
     const row = await WireSync.publish(s.serverId, line, s.serverId);
-    // Apply the server's own row now. Realtime may be down, and the publisher
-    // seeing nothing happen reads as the tool being broken. The broadcast echo
-    // is de-duplicated by rowKey in onPublish.
     applyPublishedRow(row);
     setAeToSourcePrefix();
-    // LOCAL ONLY: there is no activity endpoint yet, so this note lives in
-    // this browser and other people will not see it.
+    // Headline Activity is shared now — everyone sees who filed what.
     logActivity(s,'Filed a snap: <span class="act-kw">'+esc(line.slice(0,70))+(line.length>70?'…':'')+'</span>');
     toast('Published to the wire','s');
   }catch(e){
@@ -1668,17 +1613,14 @@ function appendSnap(story, entry){
   if(story.chain.length>500) story.chain.shift();
   if(story.id===selectedId) renderPubHistory();
 }
-// Kept as an alias so the auto-snap path and any future caller read naturally.
 const addToHistory = appendSnap;
 
-// The wrong-snap flag IS shared — flag.js exists — so everyone sees it.
 async function toggleSnapFlag(index){
   const s=selectedId?storyById[selectedId]:null;
   if(!s || !Array.isArray(s.chain)) return;
   const entry=s.chain[index];
   if(!entry) return;
   if(!s.serverId || !entry.rowKey){
-    // A locally-made snap (correction or withdrawal refile) has no server row.
     entry.flagged=!entry.flagged;
     renderPubHistory();
     return;
@@ -1686,7 +1628,6 @@ async function toggleSnapFlag(index){
   const want=!entry.flagged;
   try{
     await WireSync.flag(s.serverId, entry.rowKey, want);
-    // The broadcast applies it; this keeps the click feeling instant.
     entry.flagged=want;
     renderPubHistory();
     toast(want ? 'Flagged as wrong for everyone' : 'Flag removed', want ? 'w' : 'i');
@@ -1695,12 +1636,9 @@ async function toggleSnapFlag(index){
   }
 }
 
-// No tag chip here on purpose: the tag is part of the alert line itself
-// ("CORRECTED - EUROCELL PLC: …"), so a chip beside it just says it twice.
 function chainRows(chain, opts){
   const o=opts||{};
   let h='';
-  // Newest first on screen; the chain itself is stored oldest first.
   chain.slice().reverse().forEach(p=>{
     const i=chain.indexOf(p);
     const flagged=!!p.flagged;
@@ -1775,10 +1713,7 @@ function renderPubHistory(){
   el.querySelectorAll('tr[data-load]').forEach(tr=>tr.addEventListener('click',()=>loadSnapIntoEditor(parseInt(tr.dataset.load,10))));
 }
 
-// ═══ CORRECTION ═══
-// A correction refiles the WHOLE chain. The snaps you tick are corrected and
-// carry CORRECTED; everything else refiles unchanged as RPT. The chain that
-// went out before is archived, not deleted.
+// ═══ CORRECTION (shared) ═══
 function renderCorrectPanel(){
   const host=document.getElementById('correctChain'); if(!host) return;
   const s=selectedId?storyById[selectedId]:null;
@@ -1810,9 +1745,6 @@ function renderCorrectPanel(){
     if(tag){ tag.className='chain-tag '+(on?'cor':'rpt'); tag.textContent=on?'CORRECTED':'RPT'; }
     if(ta){
       ta.readOnly=!on;
-      // The tool puts the tag on the front of the line. The journalist writes
-      // the actual correction wording — "BEN GUYATT (NOT 'THE ROCK')" is a
-      // judgement call, not something to generate.
       if(on && !/^CORRECTED\s+-\s+/i.test(ta.value)) ta.value='CORRECTED - '+ta.value;
       if(!on) ta.value=ta.value.replace(/^CORRECTED\s+-\s+/i,'');
       if(on){ ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
@@ -1831,10 +1763,14 @@ function updateCorrectCount(){
   count.textContent = total ? (picked+' corrected · '+(total-picked)+' repeated · '+total+' snaps refiled') : '';
 }
 
-function fileCorrection(){
+// Files the corrected chain to the SERVER, which archives the old one, replaces
+// the live one and broadcasts. applyCorrection (from our response + broadcast)
+// updates the view for everyone.
+async function fileCorrection(){
   if(!requireName()) return;
   const s=selectedId?storyById[selectedId]:null;
   if(!s || s.isBundle){ toast('Pick a release first','w'); return; }
+  if(!s.serverId){ toast('That release is not on the shared wire yet','w'); return; }
   if(s.withdrawn){ toast('That chain was withdrawn — nothing to correct','w'); return; }
   const host=document.getElementById('correctChain');
   const rows=[...host.querySelectorAll('[data-row]')];
@@ -1849,36 +1785,39 @@ function fileCorrection(){
   });
   if(bad){ toast('Write the corrected wording before filing','w'); bad.querySelector('[data-text]').focus(); return; }
 
-  const old=(s.chain||[]).slice();
-  const now=hms(new Date());
-  const newChain=rows.map(r=>{
-    const i=parseInt(r.dataset.row,10);
+  // Build the full new chain, oldest first, each with its tag.
+  const snaps=rows.map(r=>{
     const on=r.querySelector('[data-pick]').checked;
-    const text=r.querySelector('[data-text]').value.trim().toUpperCase();
-    const prev=old[i]||{};
-    return {
-      author: snapperName, time: now,
-      text: on ? text : ('RPT - '+text.replace(/^RPT\s+-\s+/i,'')),
-      tag: on ? 'CORRECTED' : 'RPT',
-      category: prev.category||'', flagged:false
-    };
+    const raw=r.querySelector('[data-text]').value.trim().toUpperCase();
+    const text = on ? raw : ('RPT - '+raw.replace(/^RPT\s+-\s+/i,''));
+    return { text, tag: on ? 'CORRECTED' : 'RPT' };
   });
 
-  if(!Array.isArray(s.archive)) s.archive=[];
-  s.archive.push({ v:s.version||1, reason:'correction', by:snapperName, time:now, snaps:old });
-  s.version=(s.version||1)+1;
-  s.chain=newChain;
-
-  const nCor=picked.length, nRpt=newChain.length-nCor;
-  logActivity(s, 'Filed a <span class="act-kw">correction</span> — '+nCor+' corrected, '+nRpt+' repeated, whole chain refiled as v'+s.version);
-  showArchive=false;
-  renderPubHistory();
-  renderCorrectPanel();
-  toast('Correction filed — chain refiled as v'+s.version,'s');
+  const nCor=picked.length, nRpt=snaps.length-nCor;
+  const btn=document.getElementById('correctFile'); if(btn) btn.disabled=true;
+  try{
+    const res = await WireSync.correct(s.serverId, snaps,
+      nCor+' corrected, '+nRpt+' repeated');
+    // Apply the server's answer straight away (broadcast echo is idempotent).
+    applyCorrection({
+      chain: s.serverId,
+      version: res.version,
+      archivedVersion: res.archivedVersion,
+      by: snapperName,
+      at: Date.now(),
+      newChain: res.newChain
+    });
+    logActivity(s, 'Filed a <span class="act-kw">correction</span> — '+nCor+' corrected, '+nRpt+' repeated, whole chain refiled as v'+(res.version||((s.version||1))));
+    renderCorrectPanel();
+    toast('Correction filed for everyone — chain refiled as v'+(res.version||''),'s');
+  }catch(e){
+    toast('Could not file the correction: '+(e.message||'try again'),'r');
+  }finally{
+    if(btn) btn.disabled=false;
+  }
 }
 
-// ═══ WITHDRAW ═══
-// The whole chain goes. The advisory is the record of why.
+// ═══ WITHDRAW (shared) ═══
 function renderWithdrawPanel(){
   const host=document.getElementById('withdrawChain'); if(!host) return;
   const s=selectedId?storyById[selectedId]:null;
@@ -1905,10 +1844,11 @@ function renderWithdrawPanel(){
   if(count) count.textContent=chain.length+' snap'+(chain.length===1?'':'s')+' will be withdrawn';
 }
 
-function fileWithdrawal(){
+async function fileWithdrawal(){
   if(!requireName()) return;
   const s=selectedId?storyById[selectedId]:null;
   if(!s || s.isBundle){ toast('Pick a release first','w'); return; }
+  if(!s.serverId){ toast('That release is not on the shared wire yet','w'); return; }
   if(s.withdrawn){ toast('That chain is already withdrawn','w'); return; }
   const chain=(s.chain||[]).slice();
   if(!chain.length){ toast('Nothing to withdraw','w'); return; }
@@ -1916,20 +1856,26 @@ function fileWithdrawal(){
   const adv=(document.getElementById('withdrawAdvisory').value||'').trim().toUpperCase();
   if(!adv){ toast('Type the advisory — why is the chain being withdrawn?','w'); document.getElementById('withdrawAdvisory').focus(); return; }
 
-  const ok=window.confirm('Withdraw all '+chain.length+' snap'+(chain.length===1?'':'s')+' on chain #'+s.id+'?\n\nThe whole chain is withdrawn — this is not per-snap. It stays readable in Publish History.');
+  const ok=window.confirm('Withdraw all '+chain.length+' snap'+(chain.length===1?'':'s')+' on chain #'+s.id+' for everyone?\n\nThe whole chain is withdrawn — this is not per-snap. It stays readable in Publish History.');
   if(!ok) return;
 
-  const now=hms(new Date());
-  if(!Array.isArray(s.archive)) s.archive=[];
-  s.archive.push({ v:s.version||1, reason:'withdrawal', by:snapperName, time:now, advisory:adv, snaps:chain });
-  s.version=(s.version||1)+1;
-  s.chain=[];
-  s.withdrawn={ by:snapperName, time:now, advisory:adv };
-
-  logActivity(s, '<span class="act-wd">Withdrew</span> the chain ('+chain.length+' snap'+(chain.length===1?'':'s')+') — advisory: '+esc(adv));
-  document.getElementById('withdrawAdvisory').value='';
-  showArchive=true;
-  renderPubHistory();
-  renderWithdrawPanel();
-  toast('Chain withdrawn','s');
+  const btn=document.getElementById('withdrawFile'); if(btn) btn.disabled=true;
+  try{
+    const res = await WireSync.withdraw(s.serverId, adv);
+    applyWithdrawal({
+      chain: s.serverId,
+      archivedVersion: res.archivedVersion,
+      by: snapperName,
+      advisory: adv,
+      at: Date.now()
+    });
+    logActivity(s, '<span class="act-wd">Withdrew</span> the chain ('+chain.length+' snap'+(chain.length===1?'':'s')+') — advisory: '+esc(adv));
+    document.getElementById('withdrawAdvisory').value='';
+    renderWithdrawPanel();
+    toast('Chain withdrawn for everyone','s');
+  }catch(e){
+    toast('Could not withdraw the chain: '+(e.message||'try again'),'r');
+  }finally{
+    if(btn) btn.disabled=false;
+  }
 }
