@@ -1,52 +1,49 @@
-// Training Wire — Embargo bundles
+// Training Wire — Embargo bundles (SHARED)
 //
-// An embargo is a bundle of snaps built one after another, ahead of the news.
-// Two kinds, and the difference is only how they are let go:
+// An embargo is a bundle of snaps built ahead of the news. Two kinds, and the
+// difference is only how they are let go:
 //
-//   TIME-BASED     "Embargo" ticked + a date/time. Queued. It shows on the
+//   TIME-BASED     "Embargo" ticked + a date/time. Queued. Shows on the
 //                  Releases page straight away as PENDING and releases itself
 //                  at the stated time.
-//   RELEASE-BASED  "Embargo" unticked. Held in this panel with a Publish
-//                  button. Some companies embargo against their own release
-//                  rather than a clock, so the journalist watches the Releases
-//                  page and publishes it by hand when the release crosses.
+//   RELEASE-BASED  "Embargo" unticked. Held with a Publish button, let go by
+//                  hand when the company's own release crosses.
 //
-// The panel floats and is draggable for exactly that reason — you need to
-// watch the wire and the bundle at the same time.
+// SHARED, NOT LOCAL. Bundles used to live in this browser (TWStore) with
+// client integer ids, so nobody else saw them and two people creating a bundle
+// at once collided. Now every bundle is stored server-side with a UUID and
+// broadcast, so the whole cohort sees one shared set and can publish or discard
+// any of them. The composer below stays local until you file; filing calls the
+// server through the controller's onCreate/onPublish/onDiscard callbacks.
 //
-// This module owns the composer and the bundle list. Filing is handed back to
-// the controller through the onFile callback, which is what actually puts a
-// row on the Releases page.
-console.log('Training Wire: Embargo bundles loaded');
+// TIME-RELEASE IS SERVER-AUTHORITATIVE. The clock here does not flip a bundle
+// itself — it asks the server to release it (onRelease). The server lets only
+// the first terminal win, so twenty browsers ticking at once still produce
+// exactly one "released" broadcast.
+console.log('Training Wire: Embargo bundles (shared) loaded');
 
 const Embargo = (() => {
   'use strict';
 
-  const KEY = 'nw_bundles';
   const LANGS = ['English', 'French', 'German', 'Spanish', 'Italian', 'Portuguese', 'Japanese', 'Chinese', 'Arabic', 'Russian'];
   const BLANK_META = { products: '', topics: '', rics: '', named: '', language: 'English' };
 
   const $ = (id) => document.getElementById(id);
   const esc = (t) => { if (t == null) return ''; const d = document.createElement('div'); d.textContent = String(t); return d.innerHTML; };
 
-  let alerts = [];          // [{ text, meta }]
-  let bundles = [];         // saved: [{ id, title, kind, embargoAt, alerts, createdBy, createdAt, status }]
+  let alerts = [];          // composer: [{ text, meta }]
+  let bundles = [];         // shared, from the server: [{ id, title, kind, embargoAt, alerts, createdBy, createdAt, status, ... }]
   let metaHidden = false;
-  let nextBundleId = 1;
   let timer = null;
+  let releasing = new Set(); // bundle ids we've already asked the server to release, so the clock doesn't spam
 
-  let onFile = null;        // (bundle) => void   — puts it on the Releases page
+  // Callbacks into the controller — all hit the server.
+  let onFile = null;        // (bundle) => void            put a released/published bundle on the Releases page
+  let onCreate = null;      // (bundle) => Promise          store + broadcast a new bundle; resolves with the stored bundle (server id)
+  let onPublishHeld = null; // (id) => Promise              release-based hand publish
+  let onDiscard = null;     // (id) => Promise              remove for everyone
+  let onReleaseDue = null;  // (id) => Promise<claimed>     time-release claim (first wins)
   let whoAmI = () => '—';
-
-  // ── persistence ─────────────────────────────────────────────────────────
-  function save() { TWStore.set({ [KEY]: { bundles, nextBundleId } }); }
-  function load(cb) {
-    TWStore.get([KEY], r => {
-      const d = r[KEY];
-      if (d && Array.isArray(d.bundles)) { bundles = d.bundles; nextBundleId = d.nextBundleId || (bundles.length + 1); }
-      cb?.();
-    });
-  }
 
   // ── composer ────────────────────────────────────────────────────────────
   function blankAlert() { return { text: '', meta: { ...BLANK_META } }; }
@@ -61,7 +58,7 @@ const Embargo = (() => {
     syncKind();
   }
 
-  // Default the embargo to the next round minute, which is what a desk does.
+  // Default the embargo to a few minutes out, which is what a desk does.
   function primeDateTime() {
     const d = new Date(Date.now() + 10 * 60 * 1000);
     const pad = (n) => String(n).padStart(2, '0');
@@ -136,8 +133,8 @@ const Embargo = (() => {
       + esc(alerts[i].meta[f]) + '" placeholder="Click to enter" spellcheck="false">';
   }
 
-  // The + button: an exact copy of the latest alert, metadata included, which
-  // is the point — successive snaps off one release share their metadata.
+  // The + button copies the latest alert, metadata and all — successive snaps
+  // off one release share their metadata.
   function addAlert() {
     const last = alerts[alerts.length - 1];
     alerts.push(last ? { text: last.text, meta: { ...last.meta } } : blankAlert());
@@ -153,7 +150,7 @@ const Embargo = (() => {
     syncKind();
   }
 
-  // ── filing ──────────────────────────────────────────────────────────────
+  // ── filing (server) ───────────────────────────────────────────────────────
   function embargoStamp() {
     const d = ($('embDate')?.value || '').trim();
     const t = ($('embTime')?.value || '').trim();
@@ -162,7 +159,7 @@ const Embargo = (() => {
     return ms;
   }
 
-  function fileBundle() {
+  async function fileBundle() {
     const title = ($('embTitle')?.value || '').trim();
     const live = alerts.filter(a => (a.text || '').trim());
     const timed = isTimed();
@@ -177,42 +174,50 @@ const Embargo = (() => {
       if (at <= Date.now()) { toastOut('That embargo time has already passed', 'w'); return; }
     }
 
-    const bundle = {
-      id: nextBundleId++,
+    // What we send up. The server stamps id, createdBy and createdAt.
+    const draft = {
       title,
       kind: timed ? 'time' : 'release',
-      embargoAt: at,
+      embargoAt: timed ? at : null,
       alerts: live.map(a => ({ text: a.text.trim().toUpperCase(), meta: { ...a.meta } })),
-      createdBy: whoAmI(),
-      createdAt: Date.now(),
-      status: timed ? 'queued' : 'held'
     };
-    bundles.unshift(bundle);
-    save();
 
-    if (timed) {
-      // Goes onto the Releases page now, marked PENDING, and lets itself go at
-      // the embargo time.
-      onFile?.(bundle);
-      toastOut('Bundle queued — ' + bundle.alerts.length + ' snap' + (bundle.alerts.length === 1 ? '' : 's') + ' at ' + fmt(at), 's');
-    } else {
-      toastOut('Bundle held — publish it by hand when the release crosses', 'i');
+    const act = $('embAction');
+    if (act) act.disabled = true;
+    try {
+      // onCreate stores it server-side and broadcasts; it resolves with the
+      // stored bundle (carrying the server UUID and status). applyBundle then
+      // folds it into the shared list and, for time-based, onto the wire.
+      const stored = await onCreate?.(draft);
+      if (stored) {
+        applyBundle(stored);
+        if (stored.kind === 'time') {
+          toastOut('Bundle queued for everyone — ' + stored.alerts.length + ' snap' + (stored.alerts.length === 1 ? '' : 's') + ' at ' + fmt(stored.embargoAt), 's');
+        } else {
+          toastOut('Bundle held — publish it by hand when the release crosses', 'i');
+        }
+      }
+      resetComposer();
+      renderSaved();
+    } catch (e) {
+      toastOut('Could not save the bundle: ' + (e.message || 'try again'), 'r');
+    } finally {
+      if (act) act.disabled = false;
     }
-    resetComposer();
-    renderSaved();
   }
 
   // Release-based: the journalist saw the release land and let it go.
-  function publishHeld(id) {
+  async function publishHeld(id) {
     const b = bundles.find(x => x.id === id);
     if (!b || b.status !== 'held') return;
-    b.status = 'published';
-    b.publishedAt = Date.now();
-    b.publishedBy = whoAmI();
-    save();
-    onFile?.(b);
-    renderSaved();
-    toastOut('Bundle published — ' + b.alerts.length + ' snap' + (b.alerts.length === 1 ? '' : 's'), 's');
+    try {
+      const updated = await onPublishHeld?.(id);
+      if (updated) { applyBundle(updated); }
+      renderSaved();
+      toastOut('Bundle published for everyone — ' + (b.alerts || []).length + ' snap' + ((b.alerts || []).length === 1 ? '' : 's'), 's');
+    } catch (e) {
+      toastOut('Could not publish the bundle: ' + (e.message || 'try again'), 'r');
+    }
   }
 
   function loadIntoComposer(id) {
@@ -225,45 +230,50 @@ const Embargo = (() => {
       $('embDate').value = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
       $('embTime').value = pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
     }
-    alerts = b.alerts.map(a => ({ text: a.text, meta: { ...BLANK_META, ...a.meta } }));
+    alerts = (b.alerts || []).map(a => ({ text: a.text, meta: { ...BLANK_META, ...(a.meta || {}) } }));
     if (!alerts.length) alerts = [blankAlert()];
     renderAlerts();
     syncKind();
     toastOut('Loaded into the composer as a copy — queueing makes a new bundle', 'i');
   }
 
-  function discard(id) {
+  async function discard(id) {
     const b = bundles.find(x => x.id === id);
     if (!b) return;
-    if (!window.confirm('Discard "' + b.title + '"?\n\nIt is removed from this list. Anything already published stays on the wire.')) return;
-    bundles = bundles.filter(x => x.id !== id);
-    save();
-    renderSaved();
+    if (!window.confirm('Discard "' + b.title + '" for everyone?\n\nIt is removed from the shared list. Anything already published stays on the wire.')) return;
+    try {
+      await onDiscard?.(id);
+      removeBundleLocally(id);
+      renderSaved();
+    } catch (e) {
+      toastOut('Could not discard the bundle: ' + (e.message || 'try again'), 'r');
+    }
   }
 
   function renderSaved() {
     const host = $('embSaved'); if (!host) return;
     if (!bundles.length) { host.innerHTML = ''; return; }
-    let h = '<div class="emb-saved-h">Bundles</div>';
+    let h = '<div class="emb-saved-h">Bundles (shared)</div>';
     bundles.forEach(b => {
       const pill = b.status === 'held' ? '<span class="emb-pill held">held</span>'
         : b.status === 'published' ? '<span class="emb-pill done">published</span>'
         : b.status === 'released' ? '<span class="emb-pill done">released</span>'
         : '<span class="emb-pill timed">queued</span>';
       const when = b.kind === 'time' ? fmt(b.embargoAt) : 'on release';
+      const by = b.createdBy ? (' · ' + esc(b.createdBy)) : '';
       h += '<div class="emb-saved-row">'
         + pill
         + '<span class="emb-saved-t">' + esc(b.title) + '</span>'
-        + '<span class="emb-saved-m">' + b.alerts.length + ' snap' + (b.alerts.length === 1 ? '' : 's') + ' · ' + esc(when) + '</span>'
-        + (b.status === 'held' ? '<button class="emb-saved-btn" data-pub="' + b.id + '">Publish</button>' : '')
-        + '<button class="emb-saved-btn ghost" data-load="' + b.id + '" title="Copy into the composer">Copy</button>'
-        + '<button class="emb-saved-btn ghost" data-del="' + b.id + '" title="Discard">✕</button>'
+        + '<span class="emb-saved-m">' + (b.alerts || []).length + ' snap' + ((b.alerts || []).length === 1 ? '' : 's') + ' · ' + esc(when) + by + '</span>'
+        + (b.status === 'held' ? '<button class="emb-saved-btn" data-pub="' + esc(b.id) + '">Publish</button>' : '')
+        + '<button class="emb-saved-btn ghost" data-load="' + esc(b.id) + '" title="Copy into the composer">Copy</button>'
+        + '<button class="emb-saved-btn ghost" data-del="' + esc(b.id) + '" title="Discard for everyone">✕</button>'
         + '</div>';
     });
     host.innerHTML = h;
-    host.querySelectorAll('[data-pub]').forEach(b => b.addEventListener('click', () => publishHeld(+b.dataset.pub)));
-    host.querySelectorAll('[data-load]').forEach(b => b.addEventListener('click', () => loadIntoComposer(+b.dataset.load)));
-    host.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', () => discard(+b.dataset.del)));
+    host.querySelectorAll('[data-pub]').forEach(b => b.addEventListener('click', () => publishHeld(b.dataset.pub)));
+    host.querySelectorAll('[data-load]').forEach(b => b.addEventListener('click', () => loadIntoComposer(b.dataset.load)));
+    host.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', () => discard(b.dataset.del)));
   }
 
   function fmt(ts) {
@@ -274,19 +284,64 @@ const Embargo = (() => {
 
   function toastOut(msg, type) { try { window.toast?.(msg, type); } catch (e) { console.log(msg); } }
 
-  // ── the clock that lets queued bundles go ───────────────────────────────
+  // ── shared-state application ──────────────────────────────────────────────
+  // Fold one bundle (from a snapshot, a create, a broadcast, etc.) into the
+  // shared list, newest first, and put it on the wire when appropriate.
+  function applyBundle(b) {
+    if (!b || !b.id) return;
+    const i = bundles.findIndex(x => x.id === b.id);
+    if (i >= 0) bundles[i] = b; else bundles.unshift(b);
+    bundles.sort((a, c) => Number(c.createdAt || 0) - Number(a.createdAt || 0));
+    // Time-based bundles belong on the Releases page straight away (PENDING),
+    // then update in place when released. Release-based only appear once
+    // published by hand — until then they are held, off the wire.
+    if (b.kind === 'time' || b.status === 'published' || b.status === 'released') {
+      onFile?.(b);
+    }
+    renderSaved();
+  }
+
+  function removeBundleLocally(id) {
+    bundles = bundles.filter(x => x.id !== id);
+    releasing.delete(id);
+    renderSaved();
+  }
+
+  // Replace the whole shared list from a server snapshot (sign-in / reconnect).
+  function applySnapshot(list) {
+    bundles = (Array.isArray(list) ? list.slice() : [])
+      .sort((a, c) => Number(c.createdAt || 0) - Number(a.createdAt || 0));
+    renderSaved();
+    // Put everything that is on the wire (queued time-based + published +
+    // released) back on the Releases page. Oldest first, because the blotter
+    // puts the newest arrival on top.
+    bundles.slice().reverse().forEach(b => {
+      if (b.kind === 'time' || b.status === 'published' || b.status === 'released') onFile?.(b);
+    });
+  }
+
+  // A broadcast arrived (someone created/published/released/discarded a bundle).
+  function onBroadcast(p) {
+    if (!p || !p.sub) return;
+    if (p.sub === 'discard') { removeBundleLocally(p.id); return; }
+    if (p.bundle) applyBundle(p.bundle);
+  }
+
+  // ── the clock: asks the SERVER to release due bundles (first wins) ─────────
   function tick() {
     const now = Date.now();
-    let changed = false;
-    bundles.forEach(b => {
-      if (b.kind === 'time' && b.status === 'queued' && b.embargoAt && b.embargoAt <= now) {
-        b.status = 'released';
-        b.releasedAt = now;
-        changed = true;
-        window.onEmbargoReleased?.(b);
+    for (const b of bundles) {
+      if (b.kind === 'time' && b.status === 'queued' && b.embargoAt && b.embargoAt <= now && !releasing.has(b.id)) {
+        releasing.add(b.id);
+        Promise.resolve(onReleaseDue?.(b.id))
+          .then((claimed) => {
+            // If we didn't win the race, another terminal's broadcast will flip
+            // it for us. Either way we stop asking.
+            if (!claimed) releasing.delete(b.id);  // allow a retry if the server said "not yet"
+          })
+          .catch(() => { releasing.delete(b.id); });
       }
-    });
-    if (changed) { save(); renderSaved(); }
+    }
   }
 
   // ── float: drag + resize ────────────────────────────────────────────────
@@ -328,6 +383,10 @@ const Embargo = (() => {
   // ── api ─────────────────────────────────────────────────────────────────
   function init(opts) {
     onFile = opts?.onFile || null;
+    onCreate = opts?.onCreate || null;
+    onPublishHeld = opts?.onPublishHeld || null;
+    onDiscard = opts?.onDiscard || null;
+    onReleaseDue = opts?.onReleaseDue || null;
     whoAmI = opts?.whoAmI || (() => '—');
 
     $('embAdd')?.addEventListener('click', addAlert);
@@ -337,16 +396,8 @@ const Embargo = (() => {
     $('embClose')?.addEventListener('click', close);
     initFloat();
 
-    load(() => {
-      renderSaved();
-      // Bundles outlive a reload, so anything already let go has to be put
-      // back on the Releases page with them. Held ones are off the wire by
-      // definition — they are waiting for a human. Oldest first, because the
-      // blotter puts the newest arrival on top.
-      bundles.slice().reverse().forEach(b => { if (b.status !== 'held') onFile?.(b); });
-      tick();
-    });
     resetComposer();
+    renderSaved();
     if (timer) clearInterval(timer);
     timer = setInterval(tick, 1000);
   }
@@ -361,7 +412,11 @@ const Embargo = (() => {
   function close() { const p = $('embFloat'); if (p) p.style.display = 'none'; }
   function isOpen() { const p = $('embFloat'); return !!p && p.style.display !== 'none'; }
 
-  return { init, open, close, isOpen, all: () => bundles.slice() };
+  return {
+    init, open, close, isOpen,
+    all: () => bundles.slice(),
+    applySnapshot, applyBundle, onBroadcast, removeBundleLocally,
+  };
 })();
 
 if (typeof window !== 'undefined') window.Embargo = Embargo;
