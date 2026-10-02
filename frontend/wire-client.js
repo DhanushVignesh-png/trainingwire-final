@@ -181,6 +181,49 @@ async function deleteReleases(ids) {
   return request('/delete', { method: 'POST', body: { ids }, auth: 'session' });
 }
 
+// ── Shared corrections, withdrawals, activity, coverage, embargoes ──
+// Everything below is new: it moves what used to be browser-only state onto the
+// server so the whole cohort sees it in real time.
+
+// Refile a whole chain. snaps = [{ text, tag }], oldest first.
+async function fileCorrection(chain, snaps, note) {
+  return request('/correct', { method: 'POST', body: { chain, snaps, note: note || '' }, auth: 'session' });
+}
+
+// Withdraw a whole chain with an advisory.
+async function fileWithdrawal(chain, advisory) {
+  return request('/withdraw', { method: 'POST', body: { chain, advisory }, auth: 'session' });
+}
+
+// Log one headline-activity entry against a release.
+async function logActivity(release, what) {
+  return request('/activity', { method: 'POST', body: { release, what }, auth: 'session' });
+}
+
+// Toggle (or set) a release's coverage flag.
+async function setCover(release, covered) {
+  const b = { release };
+  if (typeof covered === 'boolean') b.covered = covered;
+  return request('/cover', { method: 'POST', body: b, auth: 'session' });
+}
+
+// Embargo bundles — one endpoint, several actions.
+async function listBundles() {
+  return request('/embargo', { method: 'POST', body: { action: 'list' }, auth: 'session' });
+}
+async function createBundle(bundle) {
+  return request('/embargo', { method: 'POST', body: { action: 'create', bundle }, auth: 'session' });
+}
+async function publishBundle(id) {
+  return request('/embargo', { method: 'POST', body: { action: 'publish', id }, auth: 'session' });
+}
+async function releaseBundle(id) {
+  return request('/embargo', { method: 'POST', body: { action: 'release', id }, auth: 'session' });
+}
+async function discardBundle(id) {
+  return request('/embargo', { method: 'POST', body: { action: 'discard', id }, auth: 'session' });
+}
+
 async function getState() {
   return request('/state', { method: 'GET', auth: 'session' });
 }
