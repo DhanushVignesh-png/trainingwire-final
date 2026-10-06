@@ -1365,6 +1365,9 @@ const SnapEngine = (() => {
     input = input || {};
     const bodyText = input.bodyText;
     const headline = input.headline;
+    // A caller can force the snap prefix (the "WELLS FARGO:" at the front of
+    // every snap off this release). When blank, fall back to auto-detection.
+    const sourceOverride = String(input.sourceOverride || '').trim();
 
     let full = safe(() => clean(normaliseBlob(stripTerminalJunk(String(bodyText || '')))),
       clean(String(bodyText || '')), 'preprocess');
@@ -1375,7 +1378,7 @@ const SnapEngine = (() => {
       return { source: '', tags: [], snaps: [], status: { gate: { state: 'skipped', reason: 'Not an LSE RNS release.' } } };
     }
 
-    const source = safe(() => deriveSourceFromText(full), '', 'source');
+    const source = sourceOverride || safe(() => deriveSourceFromText(full), '', 'source');
     const type = safe(() => classify(full), 'NONE', 'classify');
     const usableHeadline = oneLine(headline) || safe(() => recoverHeadline(full), '', 'headline');
 
