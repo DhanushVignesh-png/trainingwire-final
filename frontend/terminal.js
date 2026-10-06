@@ -819,6 +819,8 @@ function renderSendReleases(){
     } else {
       draftHost.innerHTML=
         '<div class="sr-draft">'
+        +'<label>Snap source (optional — the prefix on every snap, e.g. WELLS FARGO). Leave blank to auto-detect.</label>'
+        +'<input type="text" id="srDraftSource" maxlength="120" placeholder="e.g. WELLS FARGO">'
         +'<label>Headline (optional — leave blank to auto-detect)</label>'
         +'<input type="text" id="srDraftHeadline" placeholder="e.g. Statement regarding possible offer for easyJet plc">'
         +'<label>Paste release text (recommended — paste the full RNS announcement here)</label>'
@@ -840,22 +842,25 @@ function stageDraft(){
   const text=(document.getElementById('srDraftText')?.value||'').trim();
   const url=(document.getElementById('srDraftUrl')?.value||'').trim();
   const headline=(document.getElementById('srDraftHeadline')?.value||'').trim();
+  // The snap source — the prefix in front of every snap off this release.
+  // Optional; blank means auto-detect. Capped to match the server's MAX_SOURCE.
+  const source=(document.getElementById('srDraftSource')?.value||'').trim().slice(0,120);
 
   if(stagedReleases.length>=MAX_RELEASES){ toast('Max '+MAX_RELEASES+' releases','w'); return; }
 
   if(text){
     if(text.length < 40){ toast('That looks too short to be a release','w'); return; }
-    stagedReleases.push({ mode:'paste', text, headline });
+    stagedReleases.push({ mode:'paste', text, headline, source });
     renderSendReleases();
-    setTimeout(()=>{ const e=document.getElementById('srDraftHeadline'); if(e)e.focus(); },40);
+    setTimeout(()=>{ const e=document.getElementById('srDraftSource'); if(e)e.focus(); },40);
     return;
   }
 
   if(url){
     if(!/^https?:\/\//i.test(url)){ toast('URL must start with http(s)://','w'); return; }
-    stagedReleases.push({ mode:'url', url, headline });
+    stagedReleases.push({ mode:'url', url, headline, source });
     renderSendReleases();
-    setTimeout(()=>{ const e=document.getElementById('srDraftHeadline'); if(e)e.focus(); },40);
+    setTimeout(()=>{ const e=document.getElementById('srDraftSource'); if(e)e.focus(); },40);
     return;
   }
 
@@ -899,7 +904,8 @@ async function sendAllReleases(){
       if(!formatted || (!formatted.html && !formatted.text)){ toast('Skipped a release (empty body)','w'); continue; }
 
       const title = r.headline || formatted.title || ReleaseBuilder.guessHeadline(formatted.text || '');
-      const source = deriveSource(formatted.text || '', title);
+      // User-typed snap source wins; blank falls back to auto-detection.
+      const source = (r.source && r.source.trim()) || deriveSource(formatted.text || '', title);
 
       let injected=null;
       try{
@@ -918,7 +924,7 @@ async function sendAllReleases(){
 
       if(autoSnapOn){
         try{
-          const result = SnapEngine.snap({ bodyText: formatted.text || '', headline: title });
+          const result = SnapEngine.snap({ bodyText: formatted.text || '', headline: title, sourceOverride: source });
           for(const sn of (result.snaps || [])){
             try{ await WireSync.publish(res.id, sn.text, res.id, true); totalSnaps++; }
             catch(pe){ console.warn('auto-snap publish failed: ' + (pe && pe.message)); }
