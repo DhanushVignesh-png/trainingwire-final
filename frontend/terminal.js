@@ -796,9 +796,13 @@ function renderSendReleases(){
           mode = ReleaseBuilder.detectSourceType(r.url).toUpperCase();
           label = r.headline ? r.headline : r.url;
         }
+        const srcChip = (r.source && r.source.trim())
+          ? '<span class="sr-mode" title="Snap source">'+esc(r.source.trim())+':</span>'
+          : '';
         h+='<div class="sr-staged-row">'
           +'<span class="sr-badge">'+(i+1)+'</span>'
           +'<span class="sr-hl" title="'+esc(r.headline?r.headline:(r.mode==='paste'?'Pasted release text':r.url))+'">'+esc(label)+'</span>'
+          +srcChip
           +'<span class="sr-mode">'+mode+'</span>'
           +'<button class="sr-del" data-idx="'+i+'" title="Remove">✕</button>'
           +'</div>';
