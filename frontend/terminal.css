@@ -189,7 +189,10 @@ mark.hl-kw { background: var(--hl-yellow); }
      · figures never wrap — a wrapped number is a misread number
      · the label column takes the slack and wraps instead
      · zebra striping, because these tables are wide and the eye loses the row */
-.rl-table { width:100%; border-collapse:collapse; margin:10px 0 18px; font-size:12px; }
+/* width:auto + min-width:100% means the table fills the pane when it fits, but
+   grows past it (triggering the horizontal scroll on .reader-body) instead of
+   crushing the label column to one-character-per-line when it does not. */
+.rl-table { width:auto; min-width:100%; border-collapse:collapse; margin:10px 0 18px; font-size:12px; }
 .rl-table th, .rl-table td { padding:6px 12px; border-bottom:1px solid var(--bg-3); vertical-align:top; line-height:1.45; }
 .rl-table th { background: var(--bg-3); font-weight:700; color: var(--tx); text-align:left; border-bottom:1px solid var(--line-2); white-space:nowrap; }
 .rl-table th.num { text-align:right; }
@@ -205,8 +208,11 @@ mark.hl-kw { background: var(--hl-yellow); }
   min-width:86px;
   width:86px;
 }
-/* The label column absorbs whatever is left and is the only thing that wraps. */
-.rl-table td.rl-label, .rl-table th:first-child { text-align:left; width:auto; min-width:180px; white-space:normal; }
+/* The label column absorbs whatever is left and is the only thing that wraps.
+   max-width stops a long label stretching the table to absurd widths; the
+   min-width is the floor that the table can never squeeze it below — below this
+   the table scrolls instead, which is what stops the vertical-text collapse. */
+.rl-table td.rl-label, .rl-table th:first-child { text-align:left; width:auto; min-width:220px; max-width:520px; white-space:normal; }
 .rl-table td.rl-label { padding-left:14px; }
 
 /* Section and caption rows span the full width: "Current assets:", or a period
@@ -223,8 +229,10 @@ mark.hl-kw { background: var(--hl-yellow); }
 /* Rebuilt from text: no header row exists, so the first row needs a top edge. */
 .rl-table-text { border-top:1px solid var(--line-2); }
 
-/* Very wide tables scroll rather than squashing the figures. */
-.reader-body .rl-table { display:table; }
+/* Very wide tables scroll rather than squashing the figures. The table sizes to
+   its content (width:auto above); this pane is where the horizontal scroll
+   actually happens when the content is wider than the pane. */
+.reader-body .rl-table { display:table; table-layout:auto; }
 .reader-body { overflow-x:auto; }
 
 /* ═══ ALERT EDITOR DOCK ═══ */
