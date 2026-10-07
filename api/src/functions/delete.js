@@ -48,11 +48,28 @@ app.http('delete', {
     const deleted = [];
     let removedHistory = 0;
     try {
+      // Releases live in the single 'release' partition, and their rowKey is
+      // "<timestamp>-<id>", NOT the id. So we cannot delete by id directly —
+      // we list the partition once, map id -> rowKey, and delete by rowKey.
+      // The old code passed the id AS the rowKey, so the delete 404'd silently
+      // (swallowed by the catch) and the release survived in storage: it
+      // vanished live via the broadcast, then came back on the next refresh
+      // when /api/state reloaded it.
+      const releaseRows = await tables.list(TABLES.RELEASES, { partitionKey: 'release' });
+      const rowKeyById = new Map();
+      for (const r of releaseRows) {
+        if (r && r.id) rowKeyById.set(String(r.id), r.rowKey);
+      }
+
       for (const id of ids) {
-        // Gone already? Treat as deleted rather than failing the batch: two
-        // people clicking delete on the same release should both succeed.
-        try { await tables.remove(TABLES.RELEASES, 'release', id); } catch (e) { /* already gone */ }
-        // The chain partition key is the release id.
+        // Remove the release row by its real rowKey. Gone already? Treat as
+        // deleted rather than failing the batch: two people clicking delete on
+        // the same release should both succeed.
+        const rowKey = rowKeyById.get(id);
+        if (rowKey) {
+          try { await tables.remove(TABLES.RELEASES, 'release', rowKey); } catch (e) { /* already gone */ }
+        }
+        // The chain partition key IS the release id, so this part was correct.
         try { removedHistory += await tables.clearPartition(TABLES.HISTORY, id); } catch (e) { /* no chain */ }
         deleted.push(id);
       }
