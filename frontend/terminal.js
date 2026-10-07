@@ -1489,7 +1489,6 @@ function bundleBodyHtml(s){
         ? 'Release-based embargo, published by hand by <b>'+esc(b.publishedBy||b.createdBy||'—')+'</b>'
           +(pubWhen?' at <b>'+esc(pubWhen)+'</b>':'')+'.'
         : 'Release-based embargo, held — not yet published. Set up by <b>'+esc(b.createdBy||'—')+'</b>.');
-    : 'Release-based embargo, published by hand by <b>'+esc(b.publishedBy||b.createdBy||'—')+'</b>.';
   let h='<div class="emb-rl">'
     +'<div class="emb-rl-note">'+when+'<br>Bundle of '+(b.alerts||[]).length+' snap'
     +((b.alerts||[]).length===1?'':'s')+', set up by <b>'+esc(b.createdBy||'—')+'</b>.</div>';
