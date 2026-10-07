@@ -1478,10 +1478,17 @@ function renderReader(s){
 // ═══ EMBARGO BUNDLES ON THE WIRE ═══
 function bundleBodyHtml(s){
   const b=s.bundle||{};
+  // Release-based bundles are published by hand; show WHEN, not just by whom.
+  // embargoLabel() formats a timestamp the same way the time-based branch does.
+  const pubWhen = b.publishedAt ? embargoLabel(b.publishedAt) : '';
   const when=b.kind==='time'
     ? (s.bundleStatus==='queued'
         ? 'Queued to release at <b>'+esc(s.embargoLabel)+'</b>. Nothing has gone out yet.'
         : 'Released at <b>'+esc(s.embargoLabel)+'</b>.')
+    : (s.bundleStatus==='published'
+        ? 'Release-based embargo, published by hand by <b>'+esc(b.publishedBy||b.createdBy||'—')+'</b>'
+          +(pubWhen?' at <b>'+esc(pubWhen)+'</b>':'')+'.'
+        : 'Release-based embargo, held — not yet published. Set up by <b>'+esc(b.createdBy||'—')+'</b>.');
     : 'Release-based embargo, published by hand by <b>'+esc(b.publishedBy||b.createdBy||'—')+'</b>.';
   let h='<div class="emb-rl">'
     +'<div class="emb-rl-note">'+when+'<br>Bundle of '+(b.alerts||[]).length+' snap'
@@ -1507,16 +1514,34 @@ function embargoLabel(ts){
     +' '+pad(d.getHours())+':'+pad(d.getMinutes())+':'+pad(d.getSeconds());
 }
 
+// When a bundle actually crossed the wire. A time-based bundle crosses at its
+// releasedAt (or embargoAt as a floor); a release-based one at publishedAt. A
+// still-queued time-based bundle has not crossed yet, so it sorts by its
+// embargo time (when it WILL cross). Everything falls back to createdAt. This
+// is what the blotter sorts on, so a release injected after an embargo crossed
+// correctly appears above it, and the embargo no longer pins itself to the top.
+function bundleWireTime(b){
+  if(!b) return Date.now();
+  if(b.status==='released') return Number(b.releasedAt || b.embargoAt || b.createdAt || Date.now());
+  if(b.status==='published') return Number(b.publishedAt || b.createdAt || Date.now());
+  if(b.kind==='time') return Number(b.embargoAt || b.createdAt || Date.now());
+  return Number(b.createdAt || Date.now());
+}
+
 // A bundle becomes a row on the Releases page. Keyed by bundle.id (a server
 // UUID now), so the same bundle from a snapshot and from a broadcast is one row.
 function putBundleOnWire(bundle){
+  const when=bundleWireTime(bundle);
   const existing=stories.find(x=>x.isBundle && x.bundle && x.bundle.id===bundle.id);
   if(existing){
     existing.bundle=bundle;
     existing.bundleStatus=bundle.status;
     existing.title=bundle.title;
     existing.embargoLabel=embargoLabel(bundle.embargoAt);
-    if(bundle.status==='released' && existing.bundleStatus!=='released'){ existing.detectedAt=Date.now(); existing.timeDisplay=hms(new Date()); }
+    // Re-stamp to the real crossing time so ordering tracks the status change
+    // (queued -> released, held -> published), not the moment it was filed.
+    existing.detectedAt=when;
+    existing.timeDisplay=hms(new Date(when));
     renderBlotter();
     if(existing.id===selectedId) renderReader(existing);
     return existing;
@@ -1524,7 +1549,7 @@ function putBundleOnWire(bundle){
   const story=addStory({
     title: bundle.title,
     bodyHtml:'', bodyText:(bundle.alerts||[]).map(a=>a.text).join('\n'),
-    link:'', detectedAt:Date.now(), kind:'embargo',
+    link:'', detectedAt:when, kind:'embargo',
     source:'EMBARGO', feedId:'TRN'
   });
   story.isBundle=true;
