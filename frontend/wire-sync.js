@@ -133,11 +133,15 @@ const WireSync = (() => {
   const publishBundle = (id) => WireClient.publishBundle(id);
   const releaseBundle = (id) => WireClient.releaseBundle(id);
   const discardBundle = (id) => WireClient.discardBundle(id);
+  const listTemplates = () => WireClient.listTemplates();
+  const saveTemplate = (template) => WireClient.saveTemplate(template);
+  const deleteTemplate = (id) => WireClient.deleteTemplate(id);
 
   return {
     loadState, start, stop, inject, publish, flag, clearWire, deleteReleases,
     correct, withdraw, activity, cover,
     listBundles, createBundle, publishBundle, releaseBundle, discardBundle,
+    listTemplates, saveTemplate, deleteTemplate,
   };
 })();
 
