@@ -29,6 +29,7 @@ app.http('state', {
       releaseRows.sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
       const releases = releaseRows.map((r) => ({
         id: r.id,
+        wireNo: Number(r.wireNo || 0),
         kind: r.kind,
         contentType: r.contentType,
         sourceUrl: r.sourceUrl || '',
