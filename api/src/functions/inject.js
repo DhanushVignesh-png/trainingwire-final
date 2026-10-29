@@ -68,11 +68,6 @@ app.http('inject', {
       const kind = (raw && raw.kind === 'pdf') ? 'pdf' : 'html';
       const sourceUrl = clampStr((raw && raw.sourceUrl) || '', 2000).trim();
       const source = clampStr((raw && raw.source) || '', MAX_SOURCE).trim();
-      // PDFs arrive as raw base64 behind the __PDFB64__ sentinel. Base64 must
-      // NOT be clamped — a truncated base64 string is a corrupt PDF that looks
-      // fine until it won't render. Reject oversized PDFs loudly instead.
-      // The ceiling is the chunker's storage limit expressed in base64 chars:
-      // Table Storage tops out ~900KB raw → ~1.19M base64 chars across chunks.
       const rawBodyHtml = String((raw && raw.bodyHtml) || '');
       const isPdfBody = rawBodyHtml.startsWith('__PDFB64__');
 
