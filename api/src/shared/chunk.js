@@ -11,9 +11,12 @@
 // even after the SDK's internal encoding overhead.
 const CHUNK_SIZE = 32 * 1024;
 
-// Hard ceiling so a monster PDF can't blow the ~1MB entity limit. We budget ~28
-// chunks (~900KB) which leaves headroom for the other metadata properties.
-const MAX_CHUNKS = 28;
+// Azure caps a whole entity at ~1MB. We budget 30 chunks (~960KB of body) which
+// is the practical max before other metadata properties push the entity over the
+// limit and Azure rejects the write with EntityTooLarge. Base64 PDFs inflate the
+// source by ~33%, so files whose RAW size is above ~700KB will likely still fail
+// here — that is an Azure limit, not a bug. Move large PDFs to Blob storage.
+const MAX_CHUNKS = 30;
 
 // Split a string into chunk properties. Returns an object you spread into the
 // entity: { <prefix>N: 'chunks', <prefix>Chunks: count }.
