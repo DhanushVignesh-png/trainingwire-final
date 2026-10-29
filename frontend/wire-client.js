@@ -224,6 +224,17 @@ async function discardBundle(id) {
   return request('/embargo', { method: 'POST', body: { action: 'discard', id }, auth: 'session' });
 }
 
+// Per-user snap templates (not shared). One endpoint, three actions.
+async function listTemplates() {
+  return request('/templates', { method: 'POST', body: { action: 'list' }, auth: 'session' });
+}
+async function saveTemplate(template) {
+  return request('/templates', { method: 'POST', body: { action: 'save', template }, auth: 'session' });
+}
+async function deleteTemplate(id) {
+  return request('/templates', { method: 'POST', body: { action: 'delete', id }, auth: 'session' });
+}
+
 async function getState() {
   return request('/state', { method: 'GET', auth: 'session' });
 }
@@ -244,4 +255,6 @@ window.WireClient = {
   fetchArticle, injectReleases, publishAlert, flagAlert, clearWire, deleteReleases, getState, getRelease,
   fileCorrection, fileWithdrawal, logActivity, setCover,
   listBundles, createBundle, publishBundle, releaseBundle, discardBundle,
+  listTemplates, saveTemplate, deleteTemplate,
+};
 };
