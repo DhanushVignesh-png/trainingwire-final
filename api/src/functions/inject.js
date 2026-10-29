@@ -78,6 +78,12 @@ app.http('inject', {
 
       const now = Date.now();
       const id = crypto.randomUUID();
+      // Cosmetic wire number: 1–100, random, NON-UNIQUE (one number can repeat
+      // across releases). Generated here, server-side, so EVERYONE sees the same
+      // number for the same release — essential for "look at release 42". The
+      // real identity remains the UUID above; wireNo is only a search/display
+      // label and is never used as a key.
+      const wireNo = 1 + Math.floor(Math.random() * 100);
 
       // ── Build the entity, chunking the two large fields ──
       let htmlChunks, textChunks;
