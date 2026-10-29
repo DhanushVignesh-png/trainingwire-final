@@ -477,3 +477,75 @@ tr.covered .b-head { color: var(--tx-3); }
 .auth-link.danger { color: var(--tx-3); }
 .auth-link.danger:hover { color: var(--red); }
 /* The emailed-OTP dev banner is gone — a shared master code replaced it. */
+
+/* ══════════════════════════════════════════════════════════════════
+   DROP 3 — Blotter Date column, Template Editor, stitching affordance
+   ══════════════════════════════════════════════════════════════════ */
+
+/* ═══ BLOTTER: Date column + ID made a touch wider for the wire number ═══ */
+.c-date { width:62px; }
+.c-id   { width:40px; }
+.b-date { font-family:var(--mono); font-size:10.5px; color: var(--tx-2); white-space:nowrap; }
+/* The wire number: a plain 1–100 label, searchable, non-unique. */
+.b-wireno { font-family:var(--mono); font-size:11px; font-weight:700; color: var(--tx); white-space:nowrap; }
+.blotter tbody tr.selected .b-wireno { color: var(--sel-tx); }
+
+/* ═══ TEMPLATE EDITOR ═══ */
+.tpl-wrap { display:flex; flex-direction:column; height:100%; padding:0; }
+
+/* Context bar: shows which release is open + the New Template button. */
+.tpl-bar { display:flex; align-items:center; justify-content:space-between; gap:10px;
+  padding:8px 12px; border-bottom:1px solid var(--bg-3); background: var(--bg-2); flex-shrink:0; }
+.tpl-ctx { font-size:10.5px; color: var(--tx-3); }
+.tpl-ctx b { color: var(--tx); font-weight:700; }
+
+/* Composer */
+.tpl-editor { padding:10px 12px; border-bottom:1px solid var(--line); background:#fff; flex-shrink:0; }
+.tpl-ed-row { margin-bottom:7px; }
+.tpl-title { width:100%; font-family:var(--sans); font-size:12px; font-weight:700; padding:7px 10px;
+  border:1px solid var(--line-2); border-radius:5px; background:#fff; color: var(--tx); }
+.tpl-title:focus { outline:none; border-color: var(--blue); box-shadow:0 0 0 2px var(--blue-bg); }
+.tpl-body-in { width:100%; font-family:var(--mono); font-size:12px; line-height:1.55; padding:8px 10px;
+  border:1px solid var(--line-2); border-radius:5px; background:#fff; color: var(--tx); resize:vertical; min-height:52px; text-transform:uppercase; }
+.tpl-body-in:focus { outline:none; border-color: var(--blue); box-shadow:0 0 0 2px var(--blue-bg); }
+.tpl-ed-foot { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-top:8px; flex-wrap:wrap; }
+.tpl-inserts { display:flex; align-items:center; gap:6px; }
+.tpl-ins-lbl { font-size:10px; color: var(--tx-3); font-weight:600; }
+/* Placeholder-insert chips. The token text is held in data-ins. */
+.tpl-chip { font-family:var(--sans); font-size:10.5px; font-weight:700; padding:4px 11px;
+  border:1px solid var(--blue); border-radius:20px; background: var(--blue-bg); color: var(--blue-d); cursor:pointer; transition:.12s; }
+.tpl-chip:hover { background: var(--blue); color:#fff; }
+.tpl-chip:active { transform:translateY(1px); }
+
+/* Saved template rows */
+.tpl-list { flex:1; overflow:auto; }
+.tpl-empty { padding:16px 12px; font-size:11px; font-style:italic; color: var(--tx-3); text-align:center; line-height:1.6; }
+.tpl-empty code { font-family:var(--mono); font-size:10.5px; background: var(--bg-3); padding:1px 5px; border-radius:3px; font-style:normal; color: var(--tx-2); }
+
+/* One template = title | boxed live preview | char count | Publish | delete */
+.tpl-row { display:flex; align-items:center; gap:12px; padding:10px 12px; border-bottom:1px solid var(--bg-3); }
+.tpl-row:hover { background: var(--bg-2); }
+.tpl-row-title { width:68px; flex-shrink:0; font-size:11.5px; font-weight:700; color: var(--tx); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+/* The red-bordered live preview box from the screenshot. Red = this row has
+   something to publish (resolved snap non-empty); grey = nothing yet. */
+.tpl-preview { flex:1; min-width:0; font-family:var(--mono); font-size:12px; font-weight:700; color: var(--dark);
+  padding:9px 12px; border:1.5px solid var(--red); border-radius:7px; background:#fff;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.tpl-preview.empty { border-color: var(--line-2); color: var(--tx-3); font-weight:400; }
+.tpl-row-cc { font-family:var(--mono); font-size:11px; color: var(--tx-3); white-space:nowrap; flex-shrink:0; width:62px; text-align:right; }
+.tpl-row-cc.over { color: var(--amber); font-weight:700; }
+/* Per-row Publish. Disabled (greyed) until the row resolves — matches the shot. */
+.tpl-pub { font-family:var(--sans); font-size:11px; font-weight:700; padding:7px 16px; border-radius:5px; cursor:pointer;
+  border:1px solid var(--blue); background: var(--blue); color:#fff; flex-shrink:0; transition:.12s; }
+.tpl-pub:hover:not(:disabled) { background: var(--blue-d); }
+.tpl-pub:active:not(:disabled) { transform:translateY(1px); }
+.tpl-pub:disabled { background: var(--bg-4); color: var(--tx-3); border-color: var(--line); cursor:not-allowed; }
+.tpl-row-tools { display:flex; gap:5px; flex-shrink:0; }
+.tpl-mini { width:26px; height:26px; line-height:1; padding:0; border:1px solid var(--line-2); background:#fff;
+  border-radius:4px; cursor:pointer; font-size:11px; color: var(--tx-3); transition:.12s; }
+.tpl-mini:hover { background: var(--bg-3); color: var(--tx); }
+.tpl-mini.del:hover { background: var(--red-bg); color: var(--red); border-color: var(--red); }
+
+/* The token inside a preview, so a user can see where a placeholder still is. */
+.tpl-tok { color: var(--tx-3); font-weight:400; }
+.tpl-tok.filled { color: var(--blue-d); font-weight:700; }
