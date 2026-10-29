@@ -907,12 +907,20 @@ async function sendAllReleases(){
       // User-typed snap source wins; blank falls back to auto-detection.
       const source = (r.source && r.source.trim()) || deriveSource(formatted.text || '', title);
 
+            // PDFs carry no reconstructed HTML. We send the raw base64 behind the
+      // __PDFB64__ sentinel as the body; the reader draws the real pages to
+      // canvas (renderPdfInto). bodyText still carries the extracted text so
+      // search, the title and keyword highlighting keep working. HTML releases
+      // are unchanged.
+      const bodyHtmlOut = formatted.pdf
+        ? ('__PDFB64__' + (formatted.base64 || ''))
+        : (formatted.html || '');
       let injected=null;
       try{
         injected = await WireSync.inject([{
           title, kind, source,
           sourceUrl: link,
-          bodyHtml: formatted.html || '',
+          bodyHtml: bodyHtmlOut,
           bodyText: formatted.text || ''
         }]);
       }catch(ie){ toast('Could not send to the wire: '+(ie.message||'failed'),'r'); continue; }
