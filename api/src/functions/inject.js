@@ -76,16 +76,15 @@ app.http('inject', {
       const rawBodyHtml = String((raw && raw.bodyHtml) || '');
       const isPdfBody = rawBodyHtml.startsWith('__PDFB64__');
 
+      // PDFs arrive as raw base64 behind the __PDFB64__ sentinel and must NOT be
+      // clamped — a truncated base64 string is a corrupt PDF. We do NOT guess a
+      // size cap here: the chunker (splitBody) is the single source of truth for
+      // what fits in Table Storage, and its BODY_TOO_LARGE is already caught
+      // below with a clean per-item rejection. A redundant pre-check here only
+      // risked rejecting PDFs the chunker would have stored fine.
       let bodyHtml;
       if (isPdfBody) {
-        const b64 = rawBodyHtml.slice('__PDFB64__'.length);
-        const PDF_B64_MAX = 1_150_000;   // ~840KB raw PDF; safe under the chunk ceiling
-        if (b64.length > PDF_B64_MAX) {
-          const approxKb = Math.round((b64.length * 0.75) / 1024);
-          results.push({ ok: false, error: 'PDF too large to store (~' + approxKb + 'KB). Paste the release text instead, or use a smaller PDF.' });
-          continue;
-        }
-        bodyHtml = rawBodyHtml;   // store the sentinel + base64 intact, unclamped
+        bodyHtml = rawBodyHtml;                       // sentinel + base64, intact
       } else {
         bodyHtml = clampStr(rawBodyHtml, MAX_BODY_CHARS);
       }
