@@ -46,6 +46,7 @@ app.http('release', {
 
       const release = {
         id: r.id,
+        wireNo: Number(r.wireNo || 0),
         kind: r.kind,
         contentType: r.contentType,
         sourceUrl: r.sourceUrl || '',
