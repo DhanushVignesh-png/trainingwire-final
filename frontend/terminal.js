@@ -1080,6 +1080,7 @@ function storyFromServer(rel){
     const s = storyById[existing];
     if (rel.bodyHtml) s.bodyHtml = rel.bodyHtml;
     if (rel.bodyText) s.bodyText = rel.bodyText;
+    if (rel.wireNo) s.wireNo = Number(rel.wireNo) || s.wireNo;
     applyReleaseState(s, rel);
     return s;
   }
@@ -1094,6 +1095,7 @@ function storyFromServer(rel){
     feedId: 'TRN'
   });
   story.serverId = rel.id;
+  story.wireNo = Number(rel.wireNo || 0) || '';   // cosmetic 1–100; '' for pre-upgrade releases
   serverIdToLocal.set(rel.id, story.id);
   applyReleaseState(story, rel);
   return story;
@@ -1343,13 +1345,18 @@ function renderCoverFlag(s){
 function currentView(){
   const q=(document.getElementById('findStory').value||'').toLowerCase();
   let view=stories.filter(s=>{
-    if(q&&!((s.title+' '+s.feedName+' '+s.feedId+' '+(s.source||'')).toLowerCase().includes(q)))return false;
+    if(q){
+      // A pure number matches the wire number exactly; otherwise it's free text
+      // across headline / source / feed, as before.
+      if(/^\d{1,3}$/.test(q)){ if(String(s.wireNo||'') !== String(parseInt(q,10))) return false; }
+      else if(!((s.title+' '+s.feedName+' '+s.feedId+' '+(s.source||'')).toLowerCase().includes(q))) return false;
+    }
     return true;
   });
   view.sort((a,b)=>{
     let av,bv;
     if(sortKey==='time'){av=a.detectedAt;bv=b.detectedAt;}
-    else if(sortKey==='id'){av=a.id;bv=b.id;}
+    else if(sortKey==='id'){av=Number(a.wireNo)||0;bv=Number(b.wireNo)||0;}
     else if(sortKey==='head'){av=a.title.toLowerCase();bv=b.title.toLowerCase();}
     else if(sortKey==='src'){av=(a.source||a.feedId).toLowerCase();bv=(b.source||b.feedId).toLowerCase();}
     if(av<bv)return -1*sortDir; if(av>bv)return 1*sortDir; return 0;
@@ -1359,7 +1366,7 @@ function currentView(){
 function renderBlotter(){
   const body=document.getElementById('blotterBody'); if(!body)return;
   const view=currentView();
-  if(!view.length){ body.innerHTML='<tr class="empty-row"><td colspan="4">Open Settings → Send Releases to inject a training release.</td></tr>'; return; }
+  if(!view.length){ body.innerHTML='<tr class="empty-row"><td colspan="5">Open Settings → Send Releases to inject a training release.</td></tr>'; return; }
   let h='';
   view.forEach((s)=>{
     const breaking=(Date.now()-s.detectedAt)<8000;
@@ -1369,14 +1376,19 @@ function renderBlotter(){
       ? '<span class="b-emb'+(s.bundleStatus==='queued'?' pending':'')+'">'+(s.bundleStatus==='queued'?'PENDING':'EMBARGO')+'</span>'
       : '';
     const isPicked = pickMode && s.serverId && picked.has(s.serverId);
-    h+='<tr class="'+(cls+(pickMode?'picking ':'')+(isPicked?'picked ':'')).trim()+'" data-id="'+s.id+'">'
+    // Cosmetic wire number (1–100, server-generated, non-unique). Bundles have
+    // none. data-wireno lets the Find box match by number (templates-stitch.js).
+    const wireNo = s.isBundle ? '' : (s.wireNo || '');
+    const dateDisp = new Date(s.detectedAt).toLocaleDateString('en-GB', { day:'2-digit', month:'short' });
+    h+='<tr class="'+(cls+(pickMode?'picking ':'')+(isPicked?'picked ':'')).trim()+'" data-id="'+s.id+'" data-wireno="'+esc(String(wireNo))+'">'
       +(pickMode
         ? '<td class="b-pick">'+(s.serverId
             ? '<input type="checkbox" data-pick-id="'+esc(s.serverId)+'"'+(isPicked?' checked':'')+'>'
             : '')+'</td>'
         : '')
       +'<td class="b-time">'+esc(s.timeDisplay)+'</td>'
-      +'<td class="b-id">'+s.id+'</td>'
+      +'<td class="b-date">'+esc(dateDisp)+'</td>'
+      +'<td class="b-id"><span class="b-wireno">'+esc(String(wireNo))+'</span></td>'
       +'<td class="b-head" title="'+esc(s.title)+'">'+pill+(s.covered?'<span class="b-cov" title="Flagged as fully covered">⚑</span> ':'')+esc(s.title)+'</td>'
       +'<td class="b-src" title="'+esc(src)+'">'+esc(src)+'</td>'
       +'</tr>';
@@ -1405,6 +1417,7 @@ function selectStory(id){
   const s=storyById[id]; if(!s)return;
   renderReader(s);
   renderCoverFlag(s);
+  try{ window.TemplatesStitch?.setContext({ company: (s.source||'') }); }catch(e){}
   const isB=!!s.isBundle;
   document.getElementById('dockAE').style.display = isB ? 'none' : '';
   document.getElementById('dockPH').style.display = isB ? 'none' : '';
@@ -1576,14 +1589,35 @@ function aeSetSnapText(text){
   el.value=((m?m[1]:aeSourcePrefix())+text).toUpperCase();
   updateAeCharCount();
 }
-function captureSelection(){
+// Appends to the snap body after the SOURCE: prefix, space-joined. Used by
+// Ctrl/Cmd-select stitching so several fragments build one snap.
+function aeAppendSnapText(text){
+  const el=document.getElementById('aeBody'); if(!el) return;
+  const m=(el.value||'').match(/^([^:]{1,60}:\s*)/);
+  const prefix = m ? m[1] : aeSourcePrefix();
+  const bodyNow = (el.value||'').slice(prefix.length).trim();
+  const joined = (bodyNow ? (bodyNow + ' ' + text) : text);
+  el.value = (prefix + joined).toUpperCase();
+  updateAeCharCount();
+}
+
+function captureSelection(ev){
   const sel=window.getSelection ? window.getSelection() : null;
   if(!sel) return;
   const text=(sel.toString()||'').replace(/\s+/g,' ').trim();
   if(!text) return;
   const rb=document.getElementById('readerBody');
   if(rb && sel.anchorNode && !rb.contains(sel.anchorNode)) return;
-  aeSetSnapText(stripArticles(text));
+
+  // Keep templates' ~selected~ in step with the live highlight.
+  try{ window.TemplatesStitch?.setSelected(text); }catch(e){}
+
+  // STITCHING: holding Ctrl (Win/Linux) or Cmd (Mac) while selecting APPENDS
+  // the fragment to the current snap instead of replacing it, so a snap can be
+  // assembled from several highlights. A plain select replaces, as before.
+  const stitch = !!(ev && (ev.ctrlKey || ev.metaKey));
+  if(stitch) aeAppendSnapText(stripArticles(text));
+  else aeSetSnapText(stripArticles(text));
 }
 function resetAlertEditorBody(){
   const el=document.getElementById('aeBody'); if(!el) return;
