@@ -100,6 +100,7 @@ app.http('inject', {
         partitionKey: 'release',
         rowKey: String(now) + '-' + id,
         id,
+        wireNo,
         kind,
         contentType: kind === 'pdf' ? 'application/pdf' : 'text/html',
         sourceUrl,
@@ -119,6 +120,36 @@ app.http('inject', {
         continue;
       }
 
+      // ── Headline Activity: record WHO put this release on the wire and WHEN.
+      //    Previously nothing was logged on inject, so the activity feed never
+      //    showed a release entering. Partition is the release id, matching how
+      //    activity.js / state.js group entries. Best-effort: a failed log must
+      //    never stop the release itself from being injected. ──
+      try {
+        const actId = crypto.randomUUID();
+        const actRowKey = String(now) + '-' + actId;
+        await tables.upsert(TABLES.ACTIVITY, {
+          partitionKey: id,
+          rowKey: actRowKey,
+          id: actId,
+          release: id,
+          who: author,
+          what: 'entered a release',
+          createdAt: now,
+        });
+        // Broadcast it too, so every open terminal's activity feed updates live.
+        if (service) {
+          try {
+            await service.group(WIRE_GROUP).sendToAll({
+              type: 'activity',
+              payload: { release: id, id: actId, who: author, what: 'entered a release', createdAt: now },
+            });
+          } catch (e) { context.error('inject activity broadcast failed: ' + (e && e.message)); }
+        }
+      } catch (e) {
+        context.error('inject activity log failed: ' + (e && e.message));
+      }
+
       // ── Broadcast a LIGHT payload (metadata only). Clients pull full bodies
       //    from /api/state so we never push ~1MB frames over the socket. ──
       if (service) {
@@ -126,7 +157,7 @@ app.http('inject', {
           await service.group(WIRE_GROUP).sendToAll({
             type: 'release',
             payload: {
-              id, kind, headline: title, source, sourceUrl,
+              id, wireNo, kind, headline: title, source, sourceUrl,
               injectedBy: author, createdAt: now,
             },
           });
@@ -135,7 +166,7 @@ app.http('inject', {
         }
       }
 
-      results.push({ ok: true, id, kind });
+      results.push({ ok: true, id, wireNo, kind });
     }
 
     const ok = results.filter((r) => r.ok).length;
