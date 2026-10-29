@@ -73,6 +73,7 @@ const TABLES = {
   HISTORY:  'history',   // published alerts (per-chain partitions); flags + archives folded in
   ACTIVITY: 'activity',  // shared headline activity, partitioned per release id
   EMBARGOES:'embargoes', // shared embargo bundles, single 'bundle' partition
+  TEMPLATES:'templates', // per-user snap templates, partitioned by owner email
 };
 
 function requireEnv(keys) {
