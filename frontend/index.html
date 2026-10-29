@@ -124,13 +124,14 @@
             <thead>
               <tr>
                 <th class="c-time sortable" data-sort="time">Time</th>
+                <th class="c-date sortable" data-sort="date">Date</th>
                 <th class="c-id sortable" data-sort="id">ID</th>
                 <th class="c-head sortable" data-sort="head">Headline</th>
                 <th class="c-src sortable" data-sort="src">Source</th>
               </tr>
             </thead>
             <tbody id="blotterBody">
-              <tr class="empty-row"><td colspan="4">No releases yet. Open Settings → Send Releases to inject one.</td></tr>
+              <tr class="empty-row"><td colspan="5">No releases yet. Open Settings → Send Releases to inject one.</td></tr>
             </tbody>
           </table>
         </div>
@@ -165,7 +166,7 @@
           </div>
         </div>
         <div class="reader-foot">
-          <span class="reader-selhint">Select text → Alert Editor · Click to discard</span>
+          <span class="reader-selhint">Select → Alert Editor · Hold Ctrl while selecting to stitch · Click to discard</span>
           <div class="zoom">
             <span>A-</span>
             <input type="range" id="zoom" min="11" max="20" value="13" />
@@ -177,7 +178,8 @@
         <div class="dock dock-ae" id="dockAE">
           <div class="dock-resize" id="dockResizeAE" title="Drag to resize"></div>
           <div class="dock-tabs">
-            <button class="dock-tab on" id="aeDockTab">Alert Editor</button>
+            <button class="dock-tab on" id="aeDockTab" data-aetab="alert">Alert Editor</button>
+            <button class="dock-tab" id="tplDockTab" data-aetab="template" title="Create reusable snap templates. ~company~ fills with the source, ~selected~ with your current highlight.">Template Editor</button>
             <span class="dock-scope" id="aeScope"></span>
           </div>
           <div class="dock-body">
@@ -193,6 +195,41 @@
                     <button class="ae-btn" id="aePublish">Publish</button>
                   </div>
                 </div>
+              </div>
+            </div>
+
+            <!-- Template Editor — per-user snap templates. Rows resolve live:
+                 ~company~ = the open release's source, ~selected~ = current
+                 highlight. Publish on a row fires the resolved snap. -->
+            <div class="dock-panel" id="dockTemplate">
+              <div class="tpl-wrap">
+                <div class="tpl-bar">
+                  <span class="tpl-ctx" id="tplCtx">No release open</span>
+                  <button class="ae-btn" id="tplNew" title="Create a new template">＋ New Template</button>
+                </div>
+
+                <!-- New / edit composer (hidden until New Template) -->
+                <div class="tpl-editor" id="tplEditor" style="display:none">
+                  <div class="tpl-ed-row">
+                    <input type="text" id="tplTitle" class="tpl-title" maxlength="60" placeholder="Title — e.g. Deal, Qtrly, CMA" spellcheck="false">
+                  </div>
+                  <textarea id="tplBodyIn" class="tpl-body-in" maxlength="240" placeholder="~company~: Q2 REVENUE $~selected~ MLN" spellcheck="false"></textarea>
+                  <div class="tpl-ed-foot">
+                    <div class="tpl-inserts">
+                      <span class="tpl-ins-lbl">Insert:</span>
+                      <button class="tpl-chip" data-ins="~company~" title="Fills with the release source (company)">Company</button>
+                      <button class="tpl-chip" data-ins="~selected~" title="Fills with your current highlight">Selected</button>
+                    </div>
+                    <div class="ae-actions">
+                      <span class="ae-cc" id="tplEdCount">0 chars</span>
+                      <button class="ae-btn ghost" id="tplCancel">Cancel</button>
+                      <button class="ae-btn" id="tplSave">Save</button>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Saved templates (rows) -->
+                <div class="tpl-list" id="tplList"></div>
               </div>
             </div>
 
