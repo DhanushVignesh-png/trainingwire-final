@@ -257,4 +257,3 @@ window.WireClient = {
   listBundles, createBundle, publishBundle, releaseBundle, discardBundle,
   listTemplates, saveTemplate, deleteTemplate,
 };
-};
