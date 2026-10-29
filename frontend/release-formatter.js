@@ -419,6 +419,7 @@ const ReleaseFormatter = (() => {
     format, formatHtml, formatPdf, isNumericCell,
     buildRelease, guessHeadline, detectSourceType, decodeEntities,
     sanitizeStored,
+    ensurePdfjs,   // reader's renderPdfInto reuses this loader (one pdf.js instance)
   };
 })();
 
