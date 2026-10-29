@@ -910,14 +910,6 @@ async function sendAllReleases(){
       // User-typed snap source wins; blank falls back to auto-detection.
       const source = (r.source && r.source.trim()) || deriveSource(formatted.text || '', title);
 
-            // PDFs carry no reconstructed HTML. We send the raw base64 behind the
-      // __PDFB64__ sentinel as the body; the reader draws the real pages to
-      // canvas (renderPdfInto). bodyText still carries the extracted text so
-      // search, the title and keyword highlighting keep working. HTML releases
-      // are unchanged.
-      const bodyHtmlOut = formatted.pdf
-        ? ('__PDFB64__' + (formatted.base64 || ''))
-        : (formatted.html || '');
       // PDFs carry no reconstructed HTML. Send the raw base64 behind the
       // __PDFB64__ sentinel as the body; the reader draws the real pages to
       // canvas (renderPdfInto). bodyText still carries the extracted text so
@@ -1597,8 +1589,9 @@ function putBundleOnWire(bundle){
   story.embargoLabel=embargoLabel(bundle.embargoAt);
   renderBlotter();
   return story;
+}
 
-  // ── Faithful PDF rendering: a canvas per page + an invisible selectable text
+// ── Faithful PDF rendering: a canvas per page + an invisible selectable text
 // layer on top. The PDF is drawn exactly as authored (real tables, real
 // layout); the text layer lets the journalist highlight and snap, feeding the
 // same captureSelection path as HTML releases. Nothing is reconstructed. ──
@@ -1686,7 +1679,6 @@ function buildTextLayerManually(container, tc, viewport, pdfjs){
     frag.appendChild(span);
   }
   container.appendChild(frag);
-}
 }
 
 // ═══ ALERT EDITOR ═══
