@@ -196,25 +196,21 @@ const ReleaseFormatter = (() => {
   }
 
   // ══════════════════════════════════════════════════════════
-  //  PDF PATH — gap-analysis word joining + global column model
+  //  PDF PATH — NO reconstruction. The PDF is rendered faithfully
+  //  to a canvas in the reader (see renderPdfInto in terminal.js),
+  //  with an invisible selectable text layer over it. All earlier
+  //  attempts to rebuild tables from text-item coordinates were
+  //  fragile and produced "dancing" output; drawing the PDF as the
+  //  PDF is the only reliable path.
   //
-  //  The old path produced "dancing" output for two reasons:
-  //    1) it joined every text item on a line with a single space, so PDF.js
-  //       glyph runs became "Phas e II I" / "Rev en ue" / "los s"; and
-  //    2) it detected columns per row-batch with loose clustering, so the same
-  //       figure landed under different columns on different rows.
-  //
-  //  This rewrite fixes both:
-  //    - WORD JOINING is decided by the real horizontal gap between two items,
-  //      measured against the font size. A gap smaller than a fraction of the
-  //      space width means the two runs are one word (no space); a large gap
-  //      means a column break. This kills the split-word artefacts outright.
-  //    - COLUMNS are modelled ONCE PER PAGE from the right edges of every
-  //      numeric cell, then every row's figures are snapped to that fixed set
-  //      of columns. Figures therefore line up vertically across all rows.
-  //
-  //  PDF.js is loaded from local vendor files (CSP allows worker-src 'self'
-  //  blob:). Image-only / scanned PDFs have no text layer and are out of scope.
+  //  formatPdf therefore does the MINIMUM needed at inject time:
+  //    • keep the raw base64 so the reader can draw the real pages
+  //    • pull a clean plain-text extraction, used ONLY for the
+  //      title, the keyword-highlight scan and blotter search —
+  //      never shown as the body.
+  //  Word joining here uses the same gap test so the extracted text
+  //  isn't full of "Rev en ue"; it does NOT try to build columns,
+  //  because nothing renders this text as layout.
   // ══════════════════════════════════════════════════════════
   let pdfjsLib = null;
   async function ensurePdfjs() {
@@ -232,224 +228,48 @@ const ReleaseFormatter = (() => {
     return bytes;
   }
 
-  // One text run from PDF.js, with geometry we actually need.
-  //   x    left edge           xEnd right edge
-  //   y    baseline            h    glyph height (~font size)
-  //   sp   nominal space width for this run's font (0 when PDF.js omits it)
-  function toRun(it) {
-    const tr = it.transform;
-    const x = tr[4];
-    const y = tr[5];
-    const h = it.height || Math.abs(tr[3]) || 10;
-    const w = it.width || 0;
-    // PDF.js does not give a space width directly; estimate from font height.
-    // 0.25 * font size is a reliable nominal space for body text.
-    const sp = h * 0.25;
-    return { str: it.str, x, y, xEnd: x + w, w, h, sp, eol: !!it.hasEOL };
-  }
-
-  // Cluster runs into visual lines by baseline. yTol scales with font height so
-  // a heading line and a footnote line are both grouped correctly.
-  function clusterLines(runs) {
-    const sorted = runs.slice().sort((a, b) => (b.y - a.y) || (a.x - b.x));
+  // Join one line's PDF.js runs into text using the gap test, so glyph runs
+  // like "Rev"+"en"+"ue" glue back into one word and genuinely separate runs
+  // get a single space. No column logic — this text is for title/search only.
+  function joinRunsForText(items) {
+    const runs = items
+      .filter(it => it.str && it.str.length)
+      .map(it => {
+        const tr = it.transform;
+        const h = it.height || Math.abs(tr[3]) || 10;
+        return { str: it.str, x: tr[4], y: tr[5], xEnd: tr[4] + (it.width || 0), h, sp: h * 0.25, eol: !!it.hasEOL };
+      })
+      .filter(r => r.str);
+    // group into visual lines by baseline
     const lines = [];
-    for (const r of sorted) {
-      if (!r.str) continue;
-      const tol = Math.max(2.2, (r.h || 10) * 0.55);
-      let line = null;
-      // Search from the end: lines are built top-down, matches are usually recent.
-      for (let i = lines.length - 1; i >= 0 && i >= lines.length - 4; i--) {
-        if (Math.abs(lines[i].y - r.y) <= tol) { line = lines[i]; break; }
-      }
-      if (!line) { line = { y: r.y, h: r.h || 10, runs: [] }; lines.push(line); }
+    runs.sort((a, b) => (b.y - a.y) || (a.x - b.x));
+    for (const r of runs) {
+      const tol = Math.max(2.2, r.h * 0.55);
+      let line = lines.find(l => Math.abs(l.y - r.y) <= tol && l === lines[lines.length - 1]);
+      if (!line) { line = { y: r.y, runs: [] }; lines.push(line); }
       line.runs.push(r);
-      line.h = Math.max(line.h, r.h || 10);
     }
     lines.forEach(l => l.runs.sort((a, b) => a.x - b.x));
     lines.sort((a, b) => b.y - a.y);
-    return lines;
-  }
 
-  // ── WORD JOINING ──
-  // Walk a line's runs left to right and decide, at each boundary, whether the
-  // two runs are: the same word (no separator), separate words (one space), or
-  // a column break (recorded as a segment boundary). Returns:
-  //   { text, segments:[{ text, x, xEnd }] }
-  // where segments are the whitespace-separated "cells" of the line, each
-  // carrying its own geometry so the column model can use their right edges.
-  function joinLineRuns(runs) {
-    const segs = [];
-    let curText = '';
-    let curX = null, curEnd = null;
-    let fullText = '';
-
-    const pushSeg = () => {
-      const t = curText.replace(/\s+/g, ' ').trim();
-      if (t) segs.push({ text: t, x: curX, xEnd: curEnd });
-      curText = ''; curX = null; curEnd = null;
-    };
-
-    for (let i = 0; i < runs.length; i++) {
-      const r = runs[i];
-      const piece = r.str;
-      if (!piece) continue;
-      if (curText === '') {
-        curText = piece; curX = r.x; curEnd = r.xEnd; fullText += piece;
-        continue;
-      }
-      const prev = runs[i - 1];
-      const gap = r.x - (prev ? prev.xEnd : curEnd);
-      const sp = Math.max(prev ? prev.sp : r.sp, r.sp, 1);
-
-      // Tunables, all expressed as multiples of the nominal space width:
-      //   < 0.28 sp  → glued: same word, insert nothing  ("Rev"+"en"+"ue")
-      //   < 2.2  sp  → ordinary inter-word space
-      //   ≥ 2.2  sp  → a visual column gap: break into a new segment
-      if (gap < sp * 0.28) {
-        // Same word. Also handle a soft hyphen split across runs.
-        if (/[\u2010\u2011-]$/.test(curText) && /^[a-z]/.test(piece)) {
-          curText = curText.replace(/[\u2010\u2011-]$/, '') + piece;
-          fullText = fullText.replace(/[\u2010\u2011-]$/, '') + piece;
+    const out = [];
+    for (const line of lines) {
+      let s = '';
+      for (let i = 0; i < line.runs.length; i++) {
+        const r = line.runs[i], prev = line.runs[i - 1];
+        if (i === 0) { s = r.str; continue; }
+        const gap = r.x - prev.xEnd;
+        const sp = Math.max(prev.sp, r.sp, 1);
+        if (gap < sp * 0.28) {
+          // glued: same word (handle soft-hyphen line joins conservatively)
+          s += r.str;
         } else {
-          curText += piece; fullText += piece;
-        }
-        curEnd = r.xEnd;
-      } else if (gap < sp * 2.2) {
-        curText += ' ' + piece; curEnd = r.xEnd; fullText += ' ' + piece;
-      } else {
-        pushSeg();
-        curText = piece; curX = r.x; curEnd = r.xEnd; fullText += '   ' + piece;
-      }
-    }
-    pushSeg();
-    return { text: fullText.replace(/\s+/g, ' ').trim(), segments: segs };
-  }
-
-  // A segment that is a figure (money, percent, count, bracketed negative, dash).
-  const isNumericSeg = (s) => isNumericCell(s);
-
-  // ── GLOBAL COLUMN MODEL ──
-  // Collect the RIGHT edge of every numeric segment across the whole page, then
-  // cluster those edges. Each surviving cluster is one figure column. Using the
-  // right edge (not the centre) is what makes right-aligned figures line up.
-  function buildColumnModel(lines) {
-    const edges = [];
-    for (const ln of lines) {
-      for (const seg of ln.segments) {
-        if (isNumericSeg(seg.text)) edges.push(seg.xEnd);
-      }
-    }
-    if (edges.length < 3) return [];
-    edges.sort((a, b) => a - b);
-    const clusters = [];
-    const TOL = 14;   // points; two edges within this are the same column
-    for (const e of edges) {
-      const last = clusters[clusters.length - 1];
-      if (last && Math.abs(last.edge - e) <= TOL) {
-        last.vals.push(e);
-        last.edge = last.vals.reduce((s, v) => s + v, 0) / last.vals.length;
-      } else {
-        clusters.push({ edge: e, vals: [e] });
-      }
-    }
-    // Keep only columns that recur — a column appears on several rows. This
-    // discards stray inline figures in prose ("$0.25 per share").
-    return clusters.filter(c => c.vals.length >= 3).map(c => c.edge).sort((a, b) => a - b);
-  }
-
-  // Lay one line's segments onto the fixed column model.
-  //   label — everything left of the first figure column (joined)
-  //   cols  — one string per model column, '' where the line has no figure
-  // Returns null when the line has no figure sitting in any model column (prose).
-  function layoutRow(line, colEdges) {
-    const cols = new Array(colEdges.length).fill('');
-    const labelParts = [];
-    let placed = 0;
-    for (const seg of line.segments) {
-      if (isNumericSeg(seg.text)) {
-        // Snap to the nearest column by right edge.
-        let bestI = -1, bestD = Infinity;
-        for (let i = 0; i < colEdges.length; i++) {
-          const d = Math.abs(colEdges[i] - seg.xEnd);
-          if (d < bestD) { bestD = d; bestI = i; }
-        }
-        if (bestI >= 0 && bestD <= 26) {
-          cols[bestI] = (cols[bestI] ? cols[bestI] + ' ' : '') + seg.text;
-          placed++;
-          continue;
+          s += ' ' + r.str;
         }
       }
-      labelParts.push(seg.text);
+      out.push(s.replace(/\s+/g, ' ').trim());
     }
-    if (!placed) return null;
-    return { label: labelParts.join(' ').replace(/\s+/g, ' ').trim(), cols };
-  }
-
-  // A run of consecutive table rows → one <table>. A standalone label row with
-  // no figures that reads like a section header spans the whole width.
-  function emitTable(rowBuf, colEdges, plainRef) {
-    if (!rowBuf.length) return '';
-    let out = '<table class="rl-table rl-table-text">';
-    for (const r of rowBuf) {
-      if (r.section) {
-        out += '<tr class="rl-sec"><td colspan="' + (colEdges.length + 1) + '">' + esc(r.label) + '</td></tr>';
-        plainRef.text += r.label + '\n';
-        continue;
-      }
-      out += '<tr><td class="rl-label">' + esc(r.label) + '</td>';
-      for (const c of r.cols) out += '<td class="num">' + esc(c) + '</td>';
-      out += '</tr>';
-      plainRef.text += (r.label + ' ' + r.cols.join(' ')).replace(/\s+/g, ' ').trim() + '\n';
-    }
-    out += '</table>';
-    return out;
-  }
-
-  // Prose assembly: join wrapped lines into paragraphs, keep bullets separate.
-  function emitProse(proseBuf, plainRef) {
-    if (!proseBuf.length) return '';
-    const paras = [];
-    let cur = '', prevH = 12;
-    for (const ln of proseBuf) {
-      const t = ln.text.replace(/\s+/g, ' ').trim();
-      if (!t) continue;
-      const h = ln.h || prevH;
-      let startNew = false;
-      if (!cur) startNew = true;
-      else if (isBulletStart(t)) startNew = true;
-      else if (/[.!?:;""]$/.test(cur)) startNew = true;   // sentence ended → new para only on big gap handled below
-      // A short previous line that ended a sentence is a paragraph end.
-      if (startNew) { if (cur) paras.push(cur); cur = t; }
-      else {
-        if (/[\u2010\u2011-]$/.test(cur)) cur = cur.replace(/[\u2010\u2011-]$/, '') + t;
-        else cur += ' ' + t;
-      }
-      prevH = h;
-    }
-    if (cur) paras.push(cur);
-
-    let out = '';
-    for (const p of paras) {
-      const t = p.replace(/\s+/g, ' ').trim();
-      if (!t) continue;
-      plainRef.text += t + '\n';
-      if (isBulletStart(t)) {
-        const clean = t.replace(/^\s*(?:[•‣▪◦·\-–—\*]|\(?\d{1,2}[\.\)])\s+/, '');
-        out += '<ul class="rl-list"><li>' + esc(clean) + '</li></ul>';
-      } else if (looksLikeSectionHeader(t) && t.length <= 70) {
-        out += '<h4 class="rl-h">' + esc(t) + '</h4>';
-      } else {
-        out += '<p class="rl-p">' + esc(t) + '</p>';
-      }
-    }
-    return out;
-  }
-
-  // A label-only line that introduces a table section ("Current assets:").
-  function isSectionLabel(label) {
-    const t = String(label || '').trim();
-    if (!t || t.length > 60) return false;
-    return /:$/.test(t) || looksLikeSectionHeader(t);
+    return out.join('\n');
   }
 
   async function formatPdf(base64) {
@@ -457,61 +277,27 @@ const ReleaseFormatter = (() => {
     const data = base64ToUint8Array(base64);
     const pdf = await pdfjs.getDocument({ data }).promise;
 
-    let html = '';
-    const plainRef = { text: '' };
-
-    for (let p = 1; p <= pdf.numPages; p++) {
+    let text = '';
+    const pageCount = pdf.numPages;
+    // Extract text from a reasonable number of pages for title/search/highlight.
+    // The full document still renders page-by-page in the reader regardless.
+    const scanPages = Math.min(pageCount, 8);
+    for (let p = 1; p <= scanPages; p++) {
       const page = await pdf.getPage(p);
       const content = await page.getTextContent();
-      const runs = content.items
-        .filter(it => it.str && it.str.length)
-        .map(toRun)
-        .filter(r => r.str && r.str.trim());
-      if (!runs.length) continue;
-
-      // 1) group into visual lines, 2) word-join each line into segments.
-      const lines = clusterLines(runs).map(l => {
-        const j = joinLineRuns(l.runs);
-        return { y: l.y, h: l.h, text: j.text, segments: j.segments };
-      }).filter(l => l.text);
-
-      // 3) model the page's figure columns once.
-      const colEdges = buildColumnModel(lines);
-
-      // 4) walk lines, routing each to a table run or to prose, flushing the
-      //    opposite buffer at every switch so order is preserved.
-      let rowBuf = [];
-      let proseBuf = [];
-      const flushTable = () => { if (rowBuf.length) { html += emitTable(rowBuf, colEdges, plainRef); rowBuf = []; } };
-      const flushProse = () => { if (proseBuf.length) { html += emitProse(proseBuf, plainRef); proseBuf = []; } };
-
-      for (const ln of lines) {
-        const bullet = isBulletStart(ln.text);
-        const row = colEdges.length ? layoutRow(ln, colEdges) : null;
-
-        if (row && !bullet) {
-          // A figure-bearing line → table row.
-          flushProse();
-          rowBuf.push(row);
-        } else if (colEdges.length && rowBuf.length && isSectionLabel(ln.text) && !bullet) {
-          // A section label sitting inside a table block ("Current assets:").
-          rowBuf.push({ section: true, label: ln.text });
-        } else {
-          // Prose.
-          flushTable();
-          proseBuf.push(ln);
-        }
-      }
-      flushTable();
-      flushProse();
+      text += joinRunsForText(content.items) + '\n';
     }
+    const title = pickPdfTitle(text);
 
-    html = html
-      .replace(/(<p class="rl-p">\s*<\/p>)+/g, '')
-      .replace(/<table class="rl-table rl-table-text"><\/table>/g, '');
-
-    const title = pickPdfTitle(plainRef.text);
-    return { title, html, text: plainRef.text.trim() };
+    // The body is NOT html. We pass the raw base64 through so the reader can
+    // render real pages. A marker object tells the reader this is a live PDF.
+    return {
+      title,
+      pdf: true,
+      base64: String(base64).replace(/\s/g, ''),
+      html: '',                 // deliberately empty; reader draws canvas
+      text: text.trim(),
+    };
   }
 
   function pickPdfTitle(text) {
