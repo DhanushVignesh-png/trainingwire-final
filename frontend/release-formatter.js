@@ -219,51 +219,149 @@ const ReleaseFormatter = (() => {
     return bytes;
   }
 
-  // One page → [{text, gap}] (gap = blank space above the line, in line-heights).
-  // Runs on a line are glued with a gap test so "Rev"+"en"+"ue" stays one word.
-  function pageToLines(items) {
-    const runs = items.filter(it => it.str).map(it => {
-      const tr = it.transform, h = it.height || Math.abs(tr[3]) || 10;
-      return { str: it.str, x: tr[4], y: tr[5], xEnd: tr[4] + (it.width || 0), h };
-    });
-    const rows = [];
-    runs.sort((a, b) => (b.y - a.y) || (a.x - b.x));
-    for (const r of runs) {
-      const last = rows[rows.length - 1];
-      if (last && Math.abs(last.y - r.y) <= Math.max(2.2, r.h * 0.55)) last.runs.push(r);
-      else rows.push({ y: r.y, h: r.h, runs: [r] });
-    }
-    const lines = [];
-    let prev = null;
-    for (const row of rows) {
-      row.runs.sort((a, b) => a.x - b.x);
-      let s = '';
-      row.runs.forEach((r, i) => {
-        if (!i) { s = r.str; return; }
-        const p = row.runs[i - 1];
-        s += ((r.x - p.xEnd) < Math.max(p.h, r.h, 4) * 0.07 ? '' : ' ') + r.str;
-      });
-      s = s.replace(/\s+/g, ' ').trim();
-      if (!s) continue;
-      lines.push({ text: s, gap: prev ? (prev.y - row.y) / Math.max(row.h, prev.h, 1) : 0 });
-      prev = row;
-    }
-    return lines;
-  }
-
+  // ── Layout-aware text extraction (no drawing). Each page becomes rows of
+  // "segments" (a run of words; a wide gap starts a new segment). From those we
+  // recover: running headers (dropped), contents leaders (dropped), real numeric
+  // tables, two-column layouts (read left column, then right), headings by font
+  // size, bullets, and wrapped-line paragraphs.
+  const isNum = (s) => {
+    const t = String(s || '').replace(/\s/g, '');
+    return /^[\$£€\(]?[-–]?[\d,]+(?:\.\d+)?[\)%]?$/.test(t) || /^(n\/m|n\/a|nm|–|—|-|\(\d[\d,.]*\))$/i.test(t);
+  };
+  const rowText = (r) => r.segs.map(s => s.text).join(' ');
+  const numSegs = (r) => r.segs.filter(s => isNum(s.text)).length;
+  const isTabRow = (r) => r.segs.length >= 3 || (r.segs.length >= 2 && numSegs(r) >= 1);
   const normHF = (t) => t.toLowerCase().replace(/\d+/g, '#');
 
-  function linesToParagraphs(lines) {
-    const paras = [];
-    let cur = null;
-    for (const ln of lines) {
-      const t = ln.text;
-      const startNew = cur === null || ln.gap > 1.7 || isBulletStart(t);
-      if (startNew) { if (cur) paras.push(cur); cur = t; }
-      else cur = (/[\-\u2010]$/.test(cur) && /^[a-z]/.test(t)) ? cur.slice(0, -1) + t : cur + ' ' + t;
+  function pageToRows(items) {
+    const runs = [];
+    for (const it of items) {
+      if (!it.str) continue;
+      const tr = it.transform;
+      runs.push({ str: it.str.replace(/[\uE000-\uF8FF\u25A0-\u25AB\u2022\u25CF\u25CB\u2023]/g, '•'), x: tr[4], y: tr[5], xEnd: tr[4] + (it.width || 0), h: Math.abs(it.height || tr[3]) || 10 });
     }
-    if (cur) paras.push(cur);
-    return paras;
+    runs.sort((a, b) => (b.y - a.y) || (a.x - b.x));
+    const grouped = [];
+    for (const r of runs) {
+      const last = grouped[grouped.length - 1];
+      if (last && Math.abs(last.y - r.y) <= Math.max(2.2, Math.min(last.h, r.h) * 0.55)) {
+        last.runs.push(r);
+        if (r.str.trim()) last.h = Math.max(last.h, r.h);
+      } else grouped.push({ y: r.y, h: r.h, runs: [r] });
+    }
+    const rows = [];
+    for (const g of grouped) {
+      g.runs.sort((a, b) => a.x - b.x);
+      const gapMax = Math.max(g.h * 0.9, 5);
+      const segs = [];
+      let cur = null, prev = null;
+      for (const r of g.runs) {
+        if (!r.str.trim()) continue;   // some PDFs emit gap-wide space items; measure gaps between real runs only
+        if (cur && r.str.trim() && (r.x - prev.xEnd) > gapMax) { segs.push(cur); cur = null; }
+        if (!cur) cur = { text: r.str, x: r.x, xEnd: r.xEnd };
+        else { cur.text += ((r.x - prev.xEnd) < Math.max(prev.h, r.h, 4) * 0.07 ? '' : ' ') + r.str; cur.xEnd = r.xEnd; }
+        prev = r;
+      }
+      if (cur) segs.push(cur);
+      segs.forEach(s => { s.text = s.text.replace(/\s+/g, ' ').trim(); });
+      const clean = segs.filter(s => s.text);
+      if (clean.length) rows.push({ y: g.y, h: g.h, segs: clean });
+    }
+    return rows;
+  }
+
+  // Numeric table from a run of tabular rows. Columns = recurring right edges of numeric cells.
+  function buildTable(run) {
+    const data = run.filter(r => numSegs(r) >= 2);
+    const xs = [];
+    data.forEach(r => r.segs.forEach(s => { if (isNum(s.text)) xs.push(s.xEnd); }));
+    xs.sort((p, q) => p - q);
+    const cl = [];
+    for (const x of xs) {
+      const l = cl[cl.length - 1];
+      if (l && Math.abs(l.c - x) <= 14) { l.v.push(x); l.c = l.v.reduce((p, q) => p + q, 0) / l.v.length; }
+      else cl.push({ c: x, v: [x] });
+    }
+    const cols = cl.filter(c => c.v.length >= Math.max(2, Math.ceil(data.length * 0.4))).map(c => c.c);
+    if (cols.length < 2) return null;
+    const nearest = (x) => { let bi = 0, bd = Infinity; cols.forEach((c, i) => { const d = Math.abs(c - x); if (d < bd) { bd = d; bi = i; } }); return bi; };
+    let html = '<table class="rl-table">', text = '', seenData = false;
+    for (const r of run) {
+      const cells = new Array(cols.length).fill('');
+      const label = [];
+      for (const s of r.segs) {
+        if (s.xEnd < cols[0] - 30 && !isNum(s.text)) label.push(s.text);
+        else { const i = nearest(s.xEnd); cells[i] = (cells[i] ? cells[i] + ' ' : '') + s.text; }
+      }
+      const isData = numSegs(r) >= 1;
+      if (isData) seenData = true;
+      const tag = seenData ? 'td' : 'th';
+      html += '<tr><' + tag + (seenData ? ' class="rl-label"' : '') + '>' + esc(label.join(' ')) + '</' + tag + '>' +
+        cells.map(c => '<' + tag + ' class="num">' + esc(c) + '</' + tag + '>').join('') + '</tr>';
+      text += (label.join(' ') + ' ' + cells.filter(Boolean).join(' ')).trim() + '\n';
+    }
+    return { html: html + '</table>', text };
+  }
+
+  // Two-column layout: find an x where a column of text starts (≥3 rows begin there),
+  // check nothing on the left runs across it, then read the whole left column first
+  // and the right column after. Rows may sit on slightly different baselines — we only
+  // look at where each piece of text starts.
+  function reorderColumns(rows) {
+    const xs = [];
+    rows.forEach((r, i) => r.segs.forEach((s, k) => {
+      if (k === 0 || s.x - r.segs[k - 1].xEnd >= Math.max(18, r.h * 2.5)) xs.push({ x: s.x, i });
+    }));
+    xs.sort((p, q) => p.x - q.x);
+    const cands = [];
+    for (let k = 0; k < xs.length;) {
+      let m = k; while (m + 1 < xs.length && xs[m + 1].x - xs[k].x <= 6) m++;
+      const idx = [...new Set(xs.slice(k, m + 1).map(o => o.i))];
+      if (idx.length >= 3) cands.push({ g: xs[k].x, idx });
+      k = m + 1;
+    }
+    cands.sort((p, q) => q.idx.length - p.idx.length);
+    for (const c of cands) {
+      const G = c.g - 6, a = Math.min(...c.idx), b = Math.max(...c.idx);
+      const L = [], R = [];
+      let ok = true, leftN = 0, minLeft = Infinity;
+      for (let i = a; i <= b && ok; i++) {
+        const r = rows[i];
+        const l = r.segs.filter(s => s.x < G), rt = r.segs.filter(s => s.x >= G);
+        if (l.some(s => s.xEnd > G - 4)) ok = false;
+        l.forEach(s => { leftN++; minLeft = Math.min(minLeft, s.x); });
+        if (l.length) L.push({ y: r.y, h: r.h, segs: l });
+        if (rt.length) R.push({ y: r.y, h: r.h, segs: rt, brk: !R.length });
+      }
+      if (ok && leftN >= 3 && G - minLeft >= 90) return rows.slice(0, a).concat(L, R, rows.slice(b + 1));
+    }
+    return rows;
+  }
+  // One page of rows → ordered elements (tables built, columns untangled).
+  function pageElements(rows) {
+    const tab = rows.map(isTabRow);
+    const spans = [];
+    for (let a = 0; a < rows.length;) {
+      if (!tab[a]) { a++; continue; }
+      let b = a; while (b + 1 < rows.length && tab[b + 1]) b++;
+      const run = rows.slice(a, b + 1);
+      if (run.length >= 3 && run.filter(r => numSegs(r) >= 2).length >= 2) {
+        const t = buildTable(run);
+        if (t) spans.push({ a, b, t });
+      }
+      a = b + 1;
+    }
+    const els = [];
+    let seq = [];
+    const flushSeq = () => { reorderColumns(seq).forEach(r => els.push({ kind: 'row', row: r })); seq = []; };
+    for (let i = 0; i < rows.length; i++) {
+      const sp = spans.find(s => s.a === i);
+      if (sp) { flushSeq(); els.push({ kind: 'table', t: sp.t }); i = sp.b; }
+      else seq.push(rows[i]);
+    }
+    flushSeq();
+    if (els.length) els[0].pageStart = true;
+    return els;
   }
 
   async function formatPdf(base64) {
@@ -273,30 +371,65 @@ const ReleaseFormatter = (() => {
     const n = Math.min(pdf.numPages, PDF_MAX_PAGES);
     for (let p = 1; p <= n; p++) {
       const page = await pdf.getPage(p);
-      pages.push(pageToLines((await page.getTextContent()).items));
+      pages.push(pageToRows((await page.getTextContent()).items));
       page.cleanup();
     }
     pdf.destroy();
 
-    // Running headers/footers (same text ignoring digits on ≥3 pages) and bare page numbers.
+    // Drop running headers/footers (same text ignoring digits on ≥3 pages), bare page
+    // numbers, and contents lines with dot leaders.
     const seen = {};
-    pages.forEach(pg => new Set(pg.map(l => normHF(l.text))).forEach(k => { seen[k] = (seen[k] || 0) + 1; }));
-    const junk = (t) => /^(page\s+)?\d+(\s*(of|\/)\s*\d+)?$/i.test(t) || (pages.length >= 3 && t.length < 90 && seen[normHF(t)] >= 3);
-    const lines = [];
-    pages.forEach(pg => pg.forEach(l => { if (!junk(l.text)) lines.push(l); }));
+    pages.forEach(pg => new Set(pg.map(r => normHF(rowText(r)))).forEach(k => { seen[k] = (seen[k] || 0) + 1; }));
+    const junk = (r) => {
+      const t = rowText(r);
+      return /^page\s+\d+(\s*(of|\/)\s*\d+)?$/i.test(t) || /\.{5,}|(\.\s){5,}|…{3,}/.test(t) ||
+             (pages.length >= 3 && t.length < 160 && seen[normHF(t)] >= 3);
+    };
+    const pageNo = (r) => /^\d{1,3}(\s*(of|\/)\s*\d+)?$/.test(rowText(r));
+    const clean = pages.map(pg => pg.filter((r, i) => !junk(r) && !(pageNo(r) && (i === 0 || i === pg.length - 1))));
 
-    let html = '', text = '';
-    for (const para of linesToParagraphs(lines)) {
-      const t = para.replace(/\s+/g, ' ').trim();
-      if (!t) continue;
+    // Body font size = the most common size by amount of text.
+    const sizes = {};
+    clean.forEach(pg => pg.forEach(r => { const k = Math.round(r.h * 2) / 2; sizes[k] = (sizes[k] || 0) + rowText(r).length; }));
+    const body = Number(Object.keys(sizes).sort((p, q) => sizes[q] - sizes[p])[0]) || 10;
+
+    let html = '', text = '', cur = null, head = null, prev = null;
+    const flushHead = () => { if (!head) return; html += '<h' + head.lv + ' class="rl-h">' + esc(head.t) + '</h' + head.lv + '>'; text += head.t + '\n'; head = null; };
+    const flushPara = () => {
+      if (cur === null) return;
+      const t = cur.replace(/\s+/g, ' ').trim(); cur = null;
+      if (!t) return;
       text += t + '\n';
       html += isBulletStart(t)
         ? '<ul class="rl-list"><li>' + esc(t.replace(/^\s*(?:[•‣▪◦·\-–—\*]|\(?\d{1,2}[\.\)])\s+/, '')) + '</li></ul>'
         : '<p class="rl-p">' + esc(t) + '</p>';
+    };
+
+    for (const pg of clean) {
+      for (const el of pageElements(pg)) {
+        if (el.kind === 'table') { flushHead(); flushPara(); html += el.t.html; text += el.t.text; prev = null; continue; }
+        const r = el.row, t = rowText(r);
+        if (t.length <= 110 && r.h >= body * 1.22 && !isBulletStart(t)) {
+          flushPara();
+          if (head && Math.abs(head.h - r.h) < 0.6) head.t += ' ' + t;
+          else { flushHead(); head = { t, h: r.h, lv: r.h >= body * 1.8 ? 2 : 3 }; }
+          prev = r; continue;
+        }
+        flushHead();
+        const gap = (prev && !el.pageStart) ? (prev.y - r.y) / Math.max(r.h, prev.h, 1) : null;
+        let startNew;
+        if (cur === null) startNew = true;
+        else if (isBulletStart(t) || r.brk) startNew = true;
+        else if (gap === null) startNew = !(/[a-z,;]$/.test(cur) && /^[a-z]/.test(t));   // paragraph continues across a page break
+        else startNew = gap > 1.9 || (gap > 1.45 && /[\.\!\?"”]$/.test(cur) && /^[A-Z]/.test(t));
+        if (startNew) { flushPara(); cur = t; }
+        else cur = /[\-\u2010]$/.test(cur) ? (/^[a-z]/.test(t) ? cur.slice(0, -1) + t : cur + t) : cur + ' ' + t;
+        prev = r;
+      }
     }
+    flushHead(); flushPara();
     return { title: pickPdfTitle(text), html, text: text.trim() };
   }
-
   function pickPdfTitle(text) {
     const lines = String(text || '').split('\n').map(l => l.trim()).filter(Boolean);
     for (const l of lines) {

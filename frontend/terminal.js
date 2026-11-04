@@ -819,9 +819,9 @@ function renderSendReleases(){
     } else {
       draftHost.innerHTML=
         '<div class="sr-draft">'
-        +'<label>Snap source (optional — the prefix on every snap, e.g. WELLS FARGO). Leave blank to auto-detect.</label>'
+        +'<label>Snap source (required — the prefix on every snap, e.g. WELLS FARGO)</label>'
         +'<input type="text" id="srDraftSource" maxlength="120" placeholder="e.g. WELLS FARGO">'
-        +'<label>Headline (optional — leave blank to auto-detect)</label>'
+        +'<label>Headline (required)</label>'
         +'<input type="text" id="srDraftHeadline" placeholder="e.g. Statement regarding possible offer for easyJet plc">'
         +'<label>Paste release text (recommended — paste the full RNS announcement here)</label>'
         +'<textarea id="srDraftText" rows="6" placeholder="Paste the entire RNS release text here…"></textarea>'
@@ -843,10 +843,12 @@ function stageDraft(){
   const url=(document.getElementById('srDraftUrl')?.value||'').trim();
   const headline=(document.getElementById('srDraftHeadline')?.value||'').trim();
   // The snap source — the prefix in front of every snap off this release.
-  // Optional; blank means auto-detect. Capped to match the server's MAX_SOURCE.
+  // Required. Capped to match the server's MAX_SOURCE.
   const source=(document.getElementById('srDraftSource')?.value||'').trim().slice(0,120);
 
   if(stagedReleases.length>=MAX_RELEASES){ toast('Max '+MAX_RELEASES+' releases','w'); return; }
+  if(!source){ toast('Enter the snap source','w'); document.getElementById('srDraftSource')?.focus(); return; }
+  if(!headline){ toast('Enter the headline','w'); document.getElementById('srDraftHeadline')?.focus(); return; }
 
   if(text){
     if(text.length < 40){ toast('That looks too short to be a release','w'); return; }
