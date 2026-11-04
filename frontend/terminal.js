@@ -1629,7 +1629,7 @@ function captureSelection(ev){
   if(rb && sel.anchorNode && !rb.contains(sel.anchorNode)) return;
 
   // Keep templates' ~selected~ in step with the live highlight.
-  try{ window.TemplatesStitch?.setSelected(text); }catch(e){}
+  try{ window.TemplatesStitch?.setSelected(stripArticles(text), !!(ev && (ev.ctrlKey || ev.metaKey))); }catch(e){}
 
   // STITCHING: holding Ctrl (Win/Linux) or Cmd (Mac) while selecting APPENDS
   // the fragment to the current snap instead of replacing it, so a snap can be
@@ -1684,7 +1684,8 @@ function loadSnapIntoEditor(index){
   const entry=s.chain[index];
   if(!entry) return;
   const aeBody=document.getElementById('aeBody');
-  if(aeBody){ aeBody.value=String(entry.text||'').toUpperCase(); aeBody.focus(); }
+  if(aeBody){ aeBody.value=String(entry.text||'').toUpperCase(); }
+  try{ window.TemplatesStitch?.loadText(entry.text); }catch(e){}
   updateAeCharCount();
   toast('Loaded into Alert Editor','i');
 }

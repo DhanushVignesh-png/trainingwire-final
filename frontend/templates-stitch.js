@@ -47,8 +47,10 @@ const TemplatesStitch = (() => {
 
   // terminal.js calls this from captureSelection (patch 4C-4) on every
   // highlight, so ~selected~ tracks the live selection.
-  function setSelected(text) {
-    currentSelected = String(text || '').replace(/\s+/g, ' ').trim();
+  // stitch = Ctrl/Cmd held while selecting: APPEND to the current highlight, like the Alert Editor.
+  function setSelected(text, stitch) {
+    const clean = String(text || '').replace(/\s+/g, ' ').trim();
+    currentSelected = (stitch && currentSelected && clean) ? (currentSelected + ' ' + clean) : clean;
     renderRows();
   }
 
@@ -129,17 +131,17 @@ const TemplatesStitch = (() => {
   }
 
   // ── PUBLISH A TEMPLATE ROW ──
-  // Fast path into the Alert Editor: fill it, then click the real Publish so
-  // every downstream rule (chain id, auto-flag, length cap, author stamp) runs
-  // the one path. We never call the publish API directly here.
-  function publishRow(id) {
-    const t = allTemplates().find(x => x.id === id);
-    if (!t) return;
-    const { text, resolved } = resolve(t.body);
-    if (!resolved) { toastOut('Nothing to fill the template with yet — select text in the release', 'w'); return; }
+  // Each Alert Editor row is an editable box: type or paste anything, then Publish.
+  // Fast path into the real Alert Editor: fill it, then click its Publish so every
+  // downstream rule (chain id, auto-flag, length cap, author stamp) runs the one path.
+  const PLACEHOLDER = /~(company|selected|copied)~/i;
+  const ready = (s) => !!String(s || '').trim() && !PLACEHOLDER.test(s);
+  function publishRow(id, text) {
+    const line = String(text || '').replace(/\s+/g, ' ').trim().toUpperCase();
+    if (!ready(line)) { toastOut('Fill in the row first — highlight text in the release, or type it', 'w'); return; }
     const ae = $('aeBody');
     if (!ae) return;
-    ae.value = text;
+    ae.value = line;
     ae.dispatchEvent(new Event('input', { bubbles: true }));
     $('aePublish')?.click();
   }
@@ -154,20 +156,21 @@ const TemplatesStitch = (() => {
     el.innerHTML = co ? ('Source: <b>' + esc(co) + '</b>') : 'No release open';
   }
 
-  // Rows render in TWO places: the Alert Editor (live preview + Publish — where
-  // snapping happens) and the Template Editor (preview + edit/delete only — where
-  // templates are made). Both follow the same ~company~ / ~selected~ feed.
+  // Rows render in TWO places: the Alert Editor (EDITABLE box + Publish — where snapping
+  // happens) and the Template Editor (preview + edit/delete — where templates are made).
+  // Both follow the same ~company~ / ~selected~ feed.
   function rowsHtml(withPub) {
     let h = '';
     for (const t of allTemplates()) {
       const { text, resolved } = resolve(t.body);
-      const previewCls = resolved ? 'tpl-preview' : 'tpl-preview empty';
       const preview = text || t.body.toUpperCase();
       h += '<div class="tpl-row" data-id="' + esc(t.id) + '">'
         + '<div class="tpl-row-title" title="' + esc(t.title) + '">' + esc(t.title) + '</div>'
-        + '<div class="' + previewCls + '" title="' + esc(preview) + '">' + esc(preview) + '</div>'
-        + '<span class="tpl-row-cc' + (text.length > MAX_BODY ? ' over' : '') + '">' + text.length + ' chars</span>'
-        + (withPub ? '<button class="tpl-pub" data-pub="' + esc(t.id) + '"' + (resolved ? '' : ' disabled') + '>Publish</button>'
+        + (withPub
+            ? '<input type="text" class="tpl-preview tpl-live' + (resolved ? '' : ' empty') + '" data-live="' + esc(t.id) + '" value="' + esc(preview) + '" spellcheck="false" autocomplete="off">'
+            : '<div class="tpl-preview' + (resolved ? '' : ' empty') + '" title="' + esc(preview) + '">' + esc(preview) + '</div>')
+        + '<span class="tpl-row-cc' + (preview.length > MAX_BODY ? ' over' : '') + '">' + preview.length + ' chars</span>'
+        + (withPub ? '<button class="tpl-pub" data-pub="' + esc(t.id) + '"' + (ready(preview) ? '' : ' disabled') + '>Publish</button>'
                    : (t.builtin ? '<div class="tpl-row-tools"></div>' : '<div class="tpl-row-tools"><button class="tpl-mini" data-edit="' + esc(t.id) + '" title="Edit">✎</button>'
                      + '<button class="tpl-mini del" data-del="' + esc(t.id) + '" title="Delete">✕</button></div>'))
         + '</div>';
@@ -176,17 +179,35 @@ const TemplatesStitch = (() => {
   }
 
   function renderRows() {
-    const empty = '';
     const edHost = $('tplList'), aeHost = $('aeTplList');
     if (edHost) {
-      edHost.innerHTML = empty || rowsHtml(false);
+      edHost.innerHTML = rowsHtml(false);
       edHost.querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', () => openEditor(b.dataset.edit)));
       edHost.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', () => removeTemplate(b.dataset.del)));
     }
     if (aeHost) {
       aeHost.innerHTML = rowsHtml(true);
-      aeHost.querySelectorAll('[data-pub]').forEach(b => b.addEventListener('click', () => publishRow(b.dataset.pub)));
+      aeHost.querySelectorAll('.tpl-row').forEach(row => {
+        const inp = row.querySelector('.tpl-live'), btn = row.querySelector('.tpl-pub'), cc = row.querySelector('.tpl-row-cc');
+        const sync = () => {
+          const v = inp.value.replace(/\s+/g, ' ').trim();
+          cc.textContent = v.length + ' chars'; cc.classList.toggle('over', v.length > MAX_BODY);
+          btn.disabled = !ready(v); inp.classList.toggle('empty', !ready(v));
+        };
+        inp.addEventListener('input', sync);
+        inp.addEventListener('keydown', e => { if (e.key === 'Enter' && !btn.disabled) { e.preventDefault(); btn.click(); } });
+        btn.addEventListener('click', () => publishRow(row.dataset.id, inp.value));
+      });
     }
+  }
+
+  // A published snap clicked in Publish History loads into the Gen row for editing/refiling.
+  function loadText(text) {
+    const inp = document.querySelector('#aeTplList .tpl-live[data-live="__gen"]');
+    if (!inp) return;
+    inp.value = String(text || '').toUpperCase();
+    inp.dispatchEvent(new Event('input', { bubbles: true }));
+    inp.focus();
   }
   // ── composer open/close ──
   function openEditor(id) {
@@ -263,7 +284,7 @@ const TemplatesStitch = (() => {
     return { text: out.slice(0, MAX_BODY), resolved: !/~(COMPANY|SELECTED)~/.test(out) && !!out };
   }
 
-  return { setContext, setSelected, load, showTab, getTemplates, fill, _resolve: resolve };
+  return { setContext, setSelected, loadText, ready, load, showTab, getTemplates, fill, _resolve: resolve };
 })();
 
 if (typeof window !== 'undefined') window.TemplatesStitch = TemplatesStitch;

@@ -55,8 +55,8 @@
       const sel = getSelection();
       const t = (sel.toString() || '').replace(/\s+/g, ' ').trim();
       if (!t || !src.contains(sel.anchorNode)) return;
-      selected = (typeof stripArticles === 'function') ? stripArticles(t) : t;
-      rows();
+      const clean = (typeof stripArticles === 'function') ? stripArticles(t) : t;
+      selected = (ev && (ev.ctrlKey || ev.metaKey) && selected) ? (selected + ' ' + clean) : clean;   // Ctrl/Cmd = stitch\n      rows();
     };
     src.addEventListener('mouseup', pick);
     src.addEventListener('keyup', pick);
@@ -102,20 +102,26 @@
       return;
     }
     host.innerHTML = tpls.map(t => {
-      const { text, resolved } = TemplatesStitch.fill(t.body, company, selected);
-      return '<div class="tpl-row"><div class="tpl-row-title" title="' + esc(t.title) + '">' + esc(t.title) + '</div>' +
-        '<div class="tpl-preview' + (resolved ? '' : ' empty') + '" title="' + esc(text) + '">' + esc(text) + '</div>' +
+      const { text } = TemplatesStitch.fill(t.body, company, selected);
+      const ok = TemplatesStitch.ready(text);
+      return '<div class="tpl-row" data-id="' + esc(t.id) + '"><div class="tpl-row-title" title="' + esc(t.title) + '">' + esc(t.title) + '</div>' +
+        '<input type="text" class="tpl-preview tpl-live' + (ok ? '' : ' empty') + '" value="' + esc(text) + '" spellcheck="false" autocomplete="off">' +
         '<span class="tpl-row-cc">' + text.length + ' chars</span>' +
-        '<button class="tpl-pub" data-id="' + esc(t.id) + '"' + (resolved ? '' : ' disabled title="Highlight text above first"') + '>Publish</button></div>';
+        '<button class="tpl-pub"' + (ok ? '' : ' disabled') + '>Publish</button></div>';
     }).join('');
-    host.querySelectorAll('.tpl-pub').forEach(b => b.addEventListener('click', () => {
-      const t = TemplatesStitch.getTemplates().find(x => x.id === b.dataset.id);
-      if (t) publish(TemplatesStitch.fill(t.body, company, selected).text);
-    }));
+    host.querySelectorAll('.tpl-row').forEach(row => {
+      const inp = row.querySelector('.tpl-live'), btn = row.querySelector('.tpl-pub'), cc = row.querySelector('.tpl-row-cc');
+      const sync = () => {
+        const v = inp.value.replace(/\s+/g, ' ').trim();
+        cc.textContent = v.length + ' chars'; btn.disabled = !TemplatesStitch.ready(v); inp.classList.toggle('empty', btn.disabled);
+      };
+      inp.addEventListener('input', sync);
+      inp.addEventListener('keydown', e => { if (e.key === 'Enter' && !btn.disabled) { e.preventDefault(); btn.click(); } });
+      btn.addEventListener('click', () => publish(inp.value.replace(/\s+/g, ' ').trim().toUpperCase()));
+    });
   }
-
   async function publish(line) {
-    if (busy || !line) return;
+    if (busy || !line || !TemplatesStitch.ready(line)) return;
     if (typeof requireName === 'function' && !requireName()) return;
     busy = true;
     try {
