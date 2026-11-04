@@ -106,7 +106,7 @@
       return '<div class="tpl-row"><div class="tpl-row-title" title="' + esc(t.title) + '">' + esc(t.title) + '</div>' +
         '<div class="tpl-preview' + (resolved ? '' : ' empty') + '" title="' + esc(text) + '">' + esc(text) + '</div>' +
         '<span class="tpl-row-cc">' + text.length + ' chars</span>' +
-        '<button class="tpl-pub" data-id="' + esc(t.id) + '"' + (resolved ? '' : ' disabled') + '>Publish</button></div>';
+        '<button class="tpl-pub" data-id="' + esc(t.id) + '"' + (resolved ? '' : ' disabled title="Highlight text above first"') + '>Publish</button></div>';
     }).join('');
     host.querySelectorAll('.tpl-pub').forEach(b => b.addEventListener('click', () => {
       const t = TemplatesStitch.getTemplates().find(x => x.id === b.dataset.id);

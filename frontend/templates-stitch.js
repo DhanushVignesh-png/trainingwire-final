@@ -27,7 +27,10 @@ const TemplatesStitch = (() => {
   const TOK_COMPANY = /~company~/gi;
   const TOK_SELECTED = /~selected~|~copied~/gi;
 
+  // Built-in template, common to every user: not stored, edited or deleted.
+  const GEN = { id: '__gen', title: 'Gen', body: '~company~: ~selected~', builtin: true };
   let templates = [];
+  const allTemplates = () => [GEN, ...templates];
   let editingId = null;
   let loaded = false;
 
@@ -130,7 +133,7 @@ const TemplatesStitch = (() => {
   // every downstream rule (chain id, auto-flag, length cap, author stamp) runs
   // the one path. We never call the publish API directly here.
   function publishRow(id) {
-    const t = templates.find(x => x.id === id);
+    const t = allTemplates().find(x => x.id === id);
     if (!t) return;
     const { text, resolved } = resolve(t.body);
     if (!resolved) { toastOut('Nothing to fill the template with yet — select text in the release', 'w'); return; }
@@ -156,7 +159,7 @@ const TemplatesStitch = (() => {
   // templates are made). Both follow the same ~company~ / ~selected~ feed.
   function rowsHtml(withPub) {
     let h = '';
-    for (const t of templates) {
+    for (const t of allTemplates()) {
       const { text, resolved } = resolve(t.body);
       const previewCls = resolved ? 'tpl-preview' : 'tpl-preview empty';
       const preview = text || t.body.toUpperCase();
@@ -165,16 +168,15 @@ const TemplatesStitch = (() => {
         + '<div class="' + previewCls + '" title="' + esc(preview) + '">' + esc(preview) + '</div>'
         + '<span class="tpl-row-cc' + (text.length > MAX_BODY ? ' over' : '') + '">' + text.length + ' chars</span>'
         + (withPub ? '<button class="tpl-pub" data-pub="' + esc(t.id) + '"' + (resolved ? '' : ' disabled') + '>Publish</button>'
-                   : '<div class="tpl-row-tools"><button class="tpl-mini" data-edit="' + esc(t.id) + '" title="Edit">✎</button>'
-                     + '<button class="tpl-mini del" data-del="' + esc(t.id) + '" title="Delete">✕</button></div>')
+                   : (t.builtin ? '<div class="tpl-row-tools"></div>' : '<div class="tpl-row-tools"><button class="tpl-mini" data-edit="' + esc(t.id) + '" title="Edit">✎</button>'
+                     + '<button class="tpl-mini del" data-del="' + esc(t.id) + '" title="Delete">✕</button></div>'))
         + '</div>';
     }
     return h;
   }
 
   function renderRows() {
-    const empty = !loaded && !templates.length ? '<div class="tpl-empty">Loading…</div>'
-      : !templates.length ? '<div class="tpl-empty">No templates yet — create them in the <b>Template Editor</b> tab with <code>~company~</code> and <code>~selected~</code>.</div>' : '';
+    const empty = '';
     const edHost = $('tplList'), aeHost = $('aeTplList');
     if (edHost) {
       edHost.innerHTML = empty || rowsHtml(false);
@@ -182,7 +184,7 @@ const TemplatesStitch = (() => {
       edHost.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', () => removeTemplate(b.dataset.del)));
     }
     if (aeHost) {
-      aeHost.innerHTML = empty && !templates.length ? '' : rowsHtml(true);
+      aeHost.innerHTML = rowsHtml(true);
       aeHost.querySelectorAll('[data-pub]').forEach(b => b.addEventListener('click', () => publishRow(b.dataset.pub)));
     }
   }
@@ -254,7 +256,7 @@ const TemplatesStitch = (() => {
   }
 
   // For the blank Alert Editor: same templates, its own company / selection.
-  const getTemplates = () => templates.slice();
+  const getTemplates = () => allTemplates();
   function fill(body, company, selected) {
     let out = String(body || '').replace(TOK_COMPANY, company || '~COMPANY~').replace(TOK_SELECTED, selected || '~SELECTED~');
     out = out.replace(/\s+/g, ' ').trim().toUpperCase();
