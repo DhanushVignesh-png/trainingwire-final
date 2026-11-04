@@ -85,6 +85,7 @@
       <div class="tb-r">
         <span class="tb-who" id="tbWho"></span>
         <button class="tb-btn ghost" id="btnSignOut" title="End this session and return to the sign-in screen">Sign out</button>
+        <button class="tb-btn" id="btnBlankAE" title="Open an Alert Editor that is not tied to a release — for snapping text sent over Teams or email">Open blank alert editor</button>
         <button class="tb-btn ghost" id="btnSettings">⚙ Settings</button>
       </div>
     </div>
@@ -195,6 +196,7 @@
                     <button class="ae-btn" id="aePublish">Publish</button>
                   </div>
                 </div>
+                <div class="tpl-list ae-tpl" id="aeTplList"></div>
               </div>
             </div>
 
@@ -386,5 +388,6 @@
   <script src="auth.js"></script>
   <script src="terminal.js"></script>
   <script src="templates-stitch.js"></script>
+<script src="blank-editor.js"></script>
 </body>
 </html>

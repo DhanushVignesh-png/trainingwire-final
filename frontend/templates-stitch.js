@@ -39,13 +39,14 @@ const TemplatesStitch = (() => {
     if (ctx && typeof ctx.company === 'string') currentCompany = ctx.company.trim();
     renderContextBar();
     renderRows();
+    if (!loaded) load();   // first call after sign-in: fetch templates for the Alert Editor rows
   }
 
   // terminal.js calls this from captureSelection (patch 4C-4) on every
   // highlight, so ~selected~ tracks the live selection.
   function setSelected(text) {
     currentSelected = String(text || '').replace(/\s+/g, ' ').trim();
-    if ($('dockTemplate')?.classList.contains('on')) renderRows();
+    renderRows();
   }
 
   // Fallback source read if setContext was never called.
@@ -150,14 +151,10 @@ const TemplatesStitch = (() => {
     el.innerHTML = co ? ('Source: <b>' + esc(co) + '</b>') : 'No release open';
   }
 
-  function renderRows() {
-    const host = $('tplList');
-    if (!host) return;
-    if (!loaded && !templates.length) { host.innerHTML = '<div class="tpl-empty">Loading…</div>'; return; }
-    if (!templates.length) {
-      host.innerHTML = '<div class="tpl-empty">No templates yet. Click <b>＋ New Template</b> and use the <code>~company~</code> and <code>~selected~</code> placeholders.</div>';
-      return;
-    }
+  // Rows render in TWO places: the Alert Editor (live preview + Publish — where
+  // snapping happens) and the Template Editor (preview + edit/delete only — where
+  // templates are made). Both follow the same ~company~ / ~selected~ feed.
+  function rowsHtml(withPub) {
     let h = '';
     for (const t of templates) {
       const { text, resolved } = resolve(t.body);
@@ -167,19 +164,28 @@ const TemplatesStitch = (() => {
         + '<div class="tpl-row-title" title="' + esc(t.title) + '">' + esc(t.title) + '</div>'
         + '<div class="' + previewCls + '" title="' + esc(preview) + '">' + esc(preview) + '</div>'
         + '<span class="tpl-row-cc' + (text.length > MAX_BODY ? ' over' : '') + '">' + text.length + ' chars</span>'
-        + '<button class="tpl-pub" data-pub="' + esc(t.id) + '"' + (resolved ? '' : ' disabled') + '>Publish</button>'
-        + '<div class="tpl-row-tools">'
-        + '<button class="tpl-mini" data-edit="' + esc(t.id) + '" title="Edit">✎</button>'
-        + '<button class="tpl-mini del" data-del="' + esc(t.id) + '" title="Delete">✕</button>'
-        + '</div>'
+        + (withPub ? '<button class="tpl-pub" data-pub="' + esc(t.id) + '"' + (resolved ? '' : ' disabled') + '>Publish</button>'
+                   : '<div class="tpl-row-tools"><button class="tpl-mini" data-edit="' + esc(t.id) + '" title="Edit">✎</button>'
+                     + '<button class="tpl-mini del" data-del="' + esc(t.id) + '" title="Delete">✕</button></div>')
         + '</div>';
     }
-    host.innerHTML = h;
-    host.querySelectorAll('[data-pub]').forEach(b => b.addEventListener('click', () => publishRow(b.dataset.pub)));
-    host.querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', () => openEditor(b.dataset.edit)));
-    host.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', () => removeTemplate(b.dataset.del)));
+    return h;
   }
 
+  function renderRows() {
+    const empty = !loaded && !templates.length ? '<div class="tpl-empty">Loading…</div>'
+      : !templates.length ? '<div class="tpl-empty">No templates yet — create them in the <b>Template Editor</b> tab with <code>~company~</code> and <code>~selected~</code>.</div>' : '';
+    const edHost = $('tplList'), aeHost = $('aeTplList');
+    if (edHost) {
+      edHost.innerHTML = empty || rowsHtml(false);
+      edHost.querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', () => openEditor(b.dataset.edit)));
+      edHost.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', () => removeTemplate(b.dataset.del)));
+    }
+    if (aeHost) {
+      aeHost.innerHTML = empty && !templates.length ? '' : rowsHtml(true);
+      aeHost.querySelectorAll('[data-pub]').forEach(b => b.addEventListener('click', () => publishRow(b.dataset.pub)));
+    }
+  }
   // ── composer open/close ──
   function openEditor(id) {
     editingId = id || null;
@@ -237,6 +243,8 @@ const TemplatesStitch = (() => {
       b.addEventListener('click', () => insertToken(b.dataset.ins)));
 
     renderContextBar();
+
+    load();
   }
 
   if (document.readyState === 'loading') {
@@ -245,7 +253,15 @@ const TemplatesStitch = (() => {
     init();
   }
 
-  return { setContext, setSelected, load, showTab, _resolve: resolve };
+  // For the blank Alert Editor: same templates, its own company / selection.
+  const getTemplates = () => templates.slice();
+  function fill(body, company, selected) {
+    let out = String(body || '').replace(TOK_COMPANY, company || '~COMPANY~').replace(TOK_SELECTED, selected || '~SELECTED~');
+    out = out.replace(/\s+/g, ' ').trim().toUpperCase();
+    return { text: out.slice(0, MAX_BODY), resolved: !/~(COMPANY|SELECTED)~/.test(out) && !!out };
+  }
+
+  return { setContext, setSelected, load, showTab, getTemplates, fill, _resolve: resolve };
 })();
 
 if (typeof window !== 'undefined') window.TemplatesStitch = TemplatesStitch;

@@ -903,21 +903,15 @@ async function sendAllReleases(){
 
       // A PDF legitimately has no html (it renders from base64); accept it if it
       // has base64 OR text. HTML releases still need html or text.
-      const hasBody = formatted && (formatted.html || formatted.text || (formatted.pdf && formatted.base64));
+      const hasBody = formatted && (formatted.html || formatted.text || false);
       if(!hasBody){ toast('Skipped a release (empty body)','w'); continue; }
 
       const title = r.headline || formatted.title || ReleaseBuilder.guessHeadline(formatted.text || '');
       // User-typed snap source wins; blank falls back to auto-detection.
       const source = (r.source && r.source.trim()) || deriveSource(formatted.text || '', title);
 
-      // PDFs carry no reconstructed HTML. Send the raw base64 behind the
-      // __PDFB64__ sentinel as the body; the reader draws the real pages to
-      // canvas (renderPdfInto). bodyText still carries the extracted text so
-      // search, the title and keyword highlighting keep working. HTML releases
-      // are unchanged. The server rejects a PDF that is too large to store.
-      const bodyHtmlOut = formatted.pdf
-        ? ('__PDFB64__' + (formatted.base64 || ''))
-        : (formatted.html || '');
+      // PDFs are converted to wire-compatible HTML at inject time (text, not a visual copy).
+      const bodyHtmlOut = formatted.html || '';
       let injected=null;
       try{
         injected = await WireSync.inject([{
@@ -1488,12 +1482,16 @@ function renderReader(s){
     rb.style.fontSize=(document.getElementById('zoom').value||13)+'px';
     return;
   }
-  // PDF releases carry raw base64 behind the __PDFB64__ sentinel (inject.js /
-  // release-formatter.js). Draw the real pages to canvas — never sanitize or
-  // highlight it, as it is not HTML. Must sit ABOVE the html branch.
+  // Older PDF releases still carry raw base64 behind __PDFB64__. Convert them to
+  // wire-compatible text on read instead of drawing the PDF.
   if(typeof s.bodyHtml==='string' && s.bodyHtml.startsWith('__PDFB64__')){
-    rb.classList.remove('pdf-reader');
-    renderPdfInto(rb, s.bodyHtml.slice('__PDFB64__'.length));
+    rb.innerHTML='<div class="reader-placeholder">Preparing PDF text…</div>';
+    const sid=s.id;
+    ReleaseFormatter.formatPdf(s.bodyHtml.slice('__PDFB64__'.length)).then(f=>{
+      if(selectedId!==sid) return;
+      rb.innerHTML=ReleaseFormatter.sanitizeStored(f.html);
+      try{ highlightNode(rb); }catch(e){}
+    }).catch(()=>{ if(selectedId===sid) rb.innerHTML='<p class="rl-p">'+esc(s.bodyText||'(No body text available.)')+'</p>'; });
   } else if(s.bodyHtml){
     rb.classList.remove('pdf-reader');
     // Defence in depth: stored HTML goes through the read-time sanitizer.
@@ -1591,96 +1589,6 @@ function putBundleOnWire(bundle){
   return story;
 }
 
-// ── Faithful PDF rendering: a canvas per page + an invisible selectable text
-// layer on top. The PDF is drawn exactly as authored (real tables, real
-// layout); the text layer lets the journalist highlight and snap, feeding the
-// same captureSelection path as HTML releases. Nothing is reconstructed. ──
-let _pdfRenderToken = 0;
-async function renderPdfInto(host, base64){
-  const token = ++_pdfRenderToken;   // guards against a fast release switch
-  host.innerHTML = '<div class="reader-placeholder">Rendering PDF…</div>';
-  try{
-    const pdfjs = await (window.ReleaseFormatter && ReleaseFormatter.ensurePdfjs
-      ? ReleaseFormatter.ensurePdfjs()
-      : import('./vendor/pdf.min.mjs').then(m => { m.GlobalWorkerOptions.workerSrc = new URL('./vendor/pdf.worker.min.mjs', document.baseURI).toString(); return m; }));
-
-    const bin = atob(base64);
-    const bytes = new Uint8Array(bin.length);
-    for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
-    const pdf = await pdfjs.getDocument({ data: bytes }).promise;
-    if(token !== _pdfRenderToken) return;   // a newer release took over
-
-    host.innerHTML = '';
-    host.classList.add('pdf-reader');
-    const wrap = document.createElement('div');
-    wrap.className = 'pdf-pages';
-    host.appendChild(wrap);
-
-    const targetW = Math.max(480, host.clientWidth - 40);
-
-    for(let p=1; p<=pdf.numPages; p++){
-      if(token !== _pdfRenderToken) return;
-      const page = await pdf.getPage(p);
-      const base = page.getViewport({ scale: 1 });
-      const scale = targetW / base.width;
-      const viewport = page.getViewport({ scale });
-
-      const pageEl = document.createElement('div');
-      pageEl.className = 'pdf-page';
-      pageEl.style.width = viewport.width + 'px';
-      pageEl.style.height = viewport.height + 'px';
-
-      const canvas = document.createElement('canvas');
-      const dpr = window.devicePixelRatio || 1;
-      canvas.width  = Math.floor(viewport.width  * dpr);
-      canvas.height = Math.floor(viewport.height * dpr);
-      canvas.style.width  = viewport.width + 'px';
-      canvas.style.height = viewport.height + 'px';
-      const ctx = canvas.getContext('2d');
-      ctx.scale(dpr, dpr);
-      pageEl.appendChild(canvas);
-
-      const textLayer = document.createElement('div');
-      textLayer.className = 'pdf-textlayer';
-      pageEl.appendChild(textLayer);
-      wrap.appendChild(pageEl);
-
-      await page.render({ canvasContext: ctx, viewport }).promise;
-      if(token !== _pdfRenderToken) return;
-
-      try{
-        const tc = await page.getTextContent();
-        if(typeof pdfjs.renderTextLayer === 'function'){
-          const task = pdfjs.renderTextLayer({ textContentSource: tc, container: textLayer, viewport, textDivs: [] });
-          await (task && task.promise ? task.promise : task);
-        } else {
-          buildTextLayerManually(textLayer, tc, viewport, pdfjs);
-        }
-      }catch(e){ /* layout still shows; selection just won't work on this page */ }
-    }
-  }catch(e){
-    if(token === _pdfRenderToken) host.innerHTML = '<div class="reader-placeholder">This PDF could not be rendered.</div>';
-  }
-}
-
-// Fallback text layer if this pdf.js build has no renderTextLayer.
-function buildTextLayerManually(container, tc, viewport, pdfjs){
-  const frag = document.createDocumentFragment();
-  for(const item of tc.items){
-    if(!item.str) continue;
-    const tx = pdfjs.Util.transform(viewport.transform, item.transform);
-    const fontH = Math.hypot(tx[2], tx[3]);
-    const span = document.createElement('span');
-    span.textContent = item.str;
-    span.style.left = tx[4] + 'px';
-    span.style.top  = (tx[5] - fontH) + 'px';
-    span.style.fontSize = fontH + 'px';
-    span.style.height   = fontH + 'px';
-    frag.appendChild(span);
-  }
-  container.appendChild(frag);
-}
-
 // ═══ ALERT EDITOR ═══
 function aeSourcePrefix(){
   const s=selectedId?storyById[selectedId]:null;
@@ -1729,6 +1637,7 @@ function captureSelection(ev){
   else aeSetSnapText(stripArticles(text));
 }
 function resetAlertEditorBody(){
+  try{ window.TemplatesStitch?.setSelected(''); }catch(e){}
   const el=document.getElementById('aeBody'); if(!el) return;
   if(el.value===aeSourcePrefix()) return;
   setAeToSourcePrefix();

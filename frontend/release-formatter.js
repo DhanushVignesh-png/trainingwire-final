@@ -196,22 +196,14 @@ const ReleaseFormatter = (() => {
   }
 
   // ══════════════════════════════════════════════════════════
-  //  PDF PATH — NO reconstruction. The PDF is rendered faithfully
-  //  to a canvas in the reader (see renderPdfInto in terminal.js),
-  //  with an invisible selectable text layer over it. All earlier
-  //  attempts to rebuild tables from text-item coordinates were
-  //  fragile and produced "dancing" output; drawing the PDF as the
-  //  PDF is the only reliable path.
-  //
-  //  formatPdf therefore does the MINIMUM needed at inject time:
-  //    • keep the raw base64 so the reader can draw the real pages
-  //    • pull a clean plain-text extraction, used ONLY for the
-  //      title, the keyword-highlight scan and blotter search —
-  //      never shown as the body.
-  //  Word joining here uses the same gap test so the extracted text
-  //  isn't full of "Rev en ue"; it does NOT try to build columns,
-  //  because nothing renders this text as layout.
+  //  PDF PATH — wire-compatible text, NOT a visual copy.
+  //  Many press-release PDFs are laid out for print. The wire needs the
+  //  words, not the layout, so we pull the text out, drop page numbers and
+  //  running headers/footers, and join wrapped lines into paragraphs and
+  //  bullets. No canvas, no tables, no base64 stored — light on memory and
+  //  the reader shows ordinary selectable HTML like any other release.
   // ══════════════════════════════════════════════════════════
+  const PDF_MAX_PAGES = 40;
   let pdfjsLib = null;
   async function ensurePdfjs() {
     if (pdfjsLib) return pdfjsLib;
@@ -222,82 +214,87 @@ const ReleaseFormatter = (() => {
   }
   function base64ToUint8Array(b64) {
     const binary = atob(String(b64).replace(/\s/g, ''));
-    const len = binary.length;
-    const bytes = new Uint8Array(len);
-    for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
     return bytes;
   }
 
-  // Join one line's PDF.js runs into text using the gap test, so glyph runs
-  // like "Rev"+"en"+"ue" glue back into one word and genuinely separate runs
-  // get a single space. No column logic — this text is for title/search only.
-  function joinRunsForText(items) {
-    const runs = items
-      .filter(it => it.str && it.str.length)
-      .map(it => {
-        const tr = it.transform;
-        const h = it.height || Math.abs(tr[3]) || 10;
-        return { str: it.str, x: tr[4], y: tr[5], xEnd: tr[4] + (it.width || 0), h, sp: h * 0.25, eol: !!it.hasEOL };
-      })
-      .filter(r => r.str);
-    // group into visual lines by baseline
-    const lines = [];
+  // One page → [{text, gap}] (gap = blank space above the line, in line-heights).
+  // Runs on a line are glued with a gap test so "Rev"+"en"+"ue" stays one word.
+  function pageToLines(items) {
+    const runs = items.filter(it => it.str).map(it => {
+      const tr = it.transform, h = it.height || Math.abs(tr[3]) || 10;
+      return { str: it.str, x: tr[4], y: tr[5], xEnd: tr[4] + (it.width || 0), h };
+    });
+    const rows = [];
     runs.sort((a, b) => (b.y - a.y) || (a.x - b.x));
     for (const r of runs) {
-      const tol = Math.max(2.2, r.h * 0.55);
-      let line = lines.find(l => Math.abs(l.y - r.y) <= tol && l === lines[lines.length - 1]);
-      if (!line) { line = { y: r.y, runs: [] }; lines.push(line); }
-      line.runs.push(r);
+      const last = rows[rows.length - 1];
+      if (last && Math.abs(last.y - r.y) <= Math.max(2.2, r.h * 0.55)) last.runs.push(r);
+      else rows.push({ y: r.y, h: r.h, runs: [r] });
     }
-    lines.forEach(l => l.runs.sort((a, b) => a.x - b.x));
-    lines.sort((a, b) => b.y - a.y);
-
-    const out = [];
-    for (const line of lines) {
+    const lines = [];
+    let prev = null;
+    for (const row of rows) {
+      row.runs.sort((a, b) => a.x - b.x);
       let s = '';
-      for (let i = 0; i < line.runs.length; i++) {
-        const r = line.runs[i], prev = line.runs[i - 1];
-        if (i === 0) { s = r.str; continue; }
-        const gap = r.x - prev.xEnd;
-        const sp = Math.max(prev.sp, r.sp, 1);
-        if (gap < sp * 0.28) {
-          // glued: same word (handle soft-hyphen line joins conservatively)
-          s += r.str;
-        } else {
-          s += ' ' + r.str;
-        }
-      }
-      out.push(s.replace(/\s+/g, ' ').trim());
+      row.runs.forEach((r, i) => {
+        if (!i) { s = r.str; return; }
+        const p = row.runs[i - 1];
+        s += ((r.x - p.xEnd) < Math.max(p.h, r.h, 4) * 0.07 ? '' : ' ') + r.str;
+      });
+      s = s.replace(/\s+/g, ' ').trim();
+      if (!s) continue;
+      lines.push({ text: s, gap: prev ? (prev.y - row.y) / Math.max(row.h, prev.h, 1) : 0 });
+      prev = row;
     }
-    return out.join('\n');
+    return lines;
+  }
+
+  const normHF = (t) => t.toLowerCase().replace(/\d+/g, '#');
+
+  function linesToParagraphs(lines) {
+    const paras = [];
+    let cur = null;
+    for (const ln of lines) {
+      const t = ln.text;
+      const startNew = cur === null || ln.gap > 1.7 || isBulletStart(t);
+      if (startNew) { if (cur) paras.push(cur); cur = t; }
+      else cur = (/[\-\u2010]$/.test(cur) && /^[a-z]/.test(t)) ? cur.slice(0, -1) + t : cur + ' ' + t;
+    }
+    if (cur) paras.push(cur);
+    return paras;
   }
 
   async function formatPdf(base64) {
     const pdfjs = await ensurePdfjs();
-    const data = base64ToUint8Array(base64);
-    const pdf = await pdfjs.getDocument({ data }).promise;
-
-    let text = '';
-    const pageCount = pdf.numPages;
-    // Extract text from a reasonable number of pages for title/search/highlight.
-    // The full document still renders page-by-page in the reader regardless.
-    const scanPages = Math.min(pageCount, 8);
-    for (let p = 1; p <= scanPages; p++) {
+    const pdf = await pdfjs.getDocument({ data: base64ToUint8Array(base64), disableFontFace: true }).promise;
+    const pages = [];
+    const n = Math.min(pdf.numPages, PDF_MAX_PAGES);
+    for (let p = 1; p <= n; p++) {
       const page = await pdf.getPage(p);
-      const content = await page.getTextContent();
-      text += joinRunsForText(content.items) + '\n';
+      pages.push(pageToLines((await page.getTextContent()).items));
+      page.cleanup();
     }
-    const title = pickPdfTitle(text);
+    pdf.destroy();
 
-    // The body is NOT html. We pass the raw base64 through so the reader can
-    // render real pages. A marker object tells the reader this is a live PDF.
-    return {
-      title,
-      pdf: true,
-      base64: String(base64).replace(/\s/g, ''),
-      html: '',                 // deliberately empty; reader draws canvas
-      text: text.trim(),
-    };
+    // Running headers/footers (same text ignoring digits on ≥3 pages) and bare page numbers.
+    const seen = {};
+    pages.forEach(pg => new Set(pg.map(l => normHF(l.text))).forEach(k => { seen[k] = (seen[k] || 0) + 1; }));
+    const junk = (t) => /^(page\s+)?\d+(\s*(of|\/)\s*\d+)?$/i.test(t) || (pages.length >= 3 && t.length < 90 && seen[normHF(t)] >= 3);
+    const lines = [];
+    pages.forEach(pg => pg.forEach(l => { if (!junk(l.text)) lines.push(l); }));
+
+    let html = '', text = '';
+    for (const para of linesToParagraphs(lines)) {
+      const t = para.replace(/\s+/g, ' ').trim();
+      if (!t) continue;
+      text += t + '\n';
+      html += isBulletStart(t)
+        ? '<ul class="rl-list"><li>' + esc(t.replace(/^\s*(?:[•‣▪◦·\-–—\*]|\(?\d{1,2}[\.\)])\s+/, '')) + '</li></ul>'
+        : '<p class="rl-p">' + esc(t) + '</p>';
+    }
+    return { title: pickPdfTitle(text), html, text: text.trim() };
   }
 
   function pickPdfTitle(text) {
