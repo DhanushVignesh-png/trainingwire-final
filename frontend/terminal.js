@@ -279,6 +279,7 @@ document.addEventListener('DOMContentLoaded', () => {
     applySavedSplit();
     reflowOverlays();
     toast('Signed in as ' + acct.username, 's');
+    try{ window.showSigninBanner?.(); }catch(e){}
     await joinSharedWire();
   }});
 });

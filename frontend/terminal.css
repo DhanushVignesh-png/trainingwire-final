@@ -595,3 +595,21 @@ tr.covered .b-head { color: var(--tx-3); }
 input.tpl-live { font-family:var(--mono); font-size:11.5px; font-weight:700; color:var(--dark); outline:none; }
 input.tpl-live:focus { border-color:var(--blue); box-shadow:0 0 0 2px var(--blue-bg); }
 .be-float input.tpl-live, .ae-tpl input.tpl-live { padding:4px 8px; }
+/* ── resizable blotter columns ── */
+.blotter { table-layout:fixed; }
+.blotter thead th { position:sticky; }
+.col-rs { position:absolute; right:0; top:0; bottom:0; width:6px; cursor:col-resize; }
+.col-rs:hover, .col-rs:active { background:var(--blue); opacity:.5; }
+.blotter td, .blotter th.c-head { overflow:hidden; text-overflow:ellipsis; }
+
+/* ── Blank Alert Editor tab + snaps shown in a release body (embargo-style) ── */
+.tab.on#btnBlankAE { background:#fff; }
+.rl-snap { font-family:var(--mono); font-size:12.5px; line-height:1.55; padding:8px 11px; border-left:3px solid var(--blue); background:var(--bg-2); margin-top:10px; word-break:break-word; }
+.rl-snapmeta { font-size:10px; color:var(--tx-3); padding:3px 11px 0; }
+
+/* ── sign-in banner ── */
+.signin-banner { position:fixed; top:46px; left:50%; transform:translateX(-50%); z-index:900; max-width:min(760px,94vw); display:flex; align-items:flex-start; gap:10px;
+  background:var(--amber-bg); border:1px solid var(--amber); border-radius:6px; padding:9px 12px; font-size:12px; color:var(--tx); box-shadow:0 6px 22px rgba(0,0,0,.2); }
+.signin-banner .sb-ico { color:var(--amber); font-size:15px; line-height:1.2; }
+.signin-banner .sb-txt { line-height:1.45; }
+.signin-banner .sb-x { margin-left:auto; border:none; background:none; cursor:pointer; color:var(--tx-3); font-size:13px; }

@@ -1,12 +1,10 @@
 // FILE: frontend/blank-editor.js
 // Training Wire — Blank Alert Editor.
-// An Alert Editor that is not tied to a release: the trainer sends text over Teams
-// or email, the trainee pastes it here, highlights, and every template row fills
-// ~selected~ (~copied~ accepted). Click the text with nothing selected to clear.
-// Products / Topics / RICs are chips (no USN). Templates are the user's own, made in
-// the Template Editor tab. Publishing creates a release on the shared wire and files
-// the snap against it, the same way auto-snaps do, so it appears in Releases and
-// Publish History like any other.
+// An Alert Editor that is not tied to a release, for snapping text sent over Teams
+// or email. Gen (built-in) and the user's templates are editable rows: type or paste
+// anything, then Publish. Products / Topics / RICs are chips (no USN, no language).
+// Each published snap becomes its own release on the shared wire whose body shows the
+// snap with its Products / Topics / RICs, laid out like an embargo snap.
 'use strict';
 
 (() => {
@@ -15,7 +13,7 @@
   const toastOut = (m, t) => { try { window.toast?.(m, t); } catch (e) { console.log(m); } };
 
   const meta = { products: [], topics: [], rics: [] };
-  let company = '', selected = '', releaseId = null, busy = false;
+  let company = '', selected = '', busy = false;
 
   function build() {
     if ($('blankEd')) return;
@@ -32,8 +30,6 @@
           '<div class="be-meta"><label>Company <span class="be-sub">(fills ~company~)</span></label>' +
           '<input class="be-in" id="beCompany" placeholder="e.g. ANTHROPIC" spellcheck="false"></div>' +
         '</div>' +
-        '<label class="be-lbl">Text to snap — paste it, then highlight. Click with nothing selected to clear.</label>' +
-        '<div class="be-src" id="beSrc" contenteditable="plaintext-only" spellcheck="false" data-ph="Paste the text you were sent…"></div>' +
         '<div class="tpl-list" id="beRows"></div>' +
       '</div>';
     document.body.appendChild(el);
@@ -50,19 +46,16 @@
     }));
     $('beCompany').oninput = (e) => { company = e.target.value.trim(); rows(); };
 
-    const src = $('beSrc');
-    const pick = (ev) => {
+    // Text highlighted in the release body fills ~selected~ here too (Ctrl/Cmd = stitch).
+    document.addEventListener('mouseup', (ev) => {
+      if ($('blankEd').style.display === 'none') return;
       const sel = getSelection();
       const t = (sel.toString() || '').replace(/\s+/g, ' ').trim();
-      if (!t || !src.contains(sel.anchorNode)) return;
+      const rb = $('readerBody');
+      if (!t || !rb || !sel.anchorNode || !rb.contains(sel.anchorNode)) return;
       const clean = (typeof stripArticles === 'function') ? stripArticles(t) : t;
-      selected = (ev && (ev.ctrlKey || ev.metaKey) && selected) ? (selected + ' ' + clean) : clean;   // Ctrl/Cmd = stitch\n      rows();
-    };
-    src.addEventListener('mouseup', pick);
-    src.addEventListener('keyup', pick);
-    src.addEventListener('click', () => {
-      if ((getSelection().toString() || '').trim()) return;
-      if (selected) { selected = ''; rows(); }
+      selected = ((ev.ctrlKey || ev.metaKey) && selected) ? (selected + ' ' + clean) : clean;
+      rows();
     });
 
     let drag = null;
@@ -96,12 +89,7 @@
   function rows() {
     const host = $('beRows');
     if (!host || !window.TemplatesStitch) return;
-    const tpls = TemplatesStitch.getTemplates();
-    if (!tpls.length) {
-      host.innerHTML = '<div class="tpl-empty">No templates yet — create them in the <b>Template Editor</b> tab.</div>';
-      return;
-    }
-    host.innerHTML = tpls.map(t => {
+    host.innerHTML = TemplatesStitch.getTemplates().map(t => {
       const { text } = TemplatesStitch.fill(t.body, company, selected);
       const ok = TemplatesStitch.ready(text);
       return '<div class="tpl-row" data-id="' + esc(t.id) + '"><div class="tpl-row-title" title="' + esc(t.title) + '">' + esc(t.title) + '</div>' +
@@ -120,25 +108,32 @@
       btn.addEventListener('click', () => publish(inp.value.replace(/\s+/g, ' ').trim().toUpperCase()));
     });
   }
+
+  // Body of the release this snap lives in: the snap, then its metadata line.
+  function snapBody(line) {
+    const bits = [
+      meta.products.length && ('Products: ' + meta.products.join(', ')),
+      meta.topics.length && ('Topics: ' + meta.topics.join(', ')),
+      meta.rics.length && ('RICs: ' + meta.rics.join(', '))
+    ].filter(Boolean).join(' · ');
+    return '<div class="rl-snap">' + esc(line) + '</div>' + (bits ? '<div class="rl-snapmeta">' + esc(bits) + '</div>' : '');
+  }
+
   async function publish(line) {
     if (busy || !line || !TemplatesStitch.ready(line)) return;
     if (typeof requireName === 'function' && !requireName()) return;
     busy = true;
     try {
-      let firstId = null;
-      if (!releaseId) {
-        const body = ($('beSrc').innerText || '').trim();
-        const out = await WireSync.inject([{
-          title: line.slice(0, 160), kind: 'paste', source: (company || 'MANUAL').toUpperCase(), sourceUrl: '',
-          bodyHtml: body ? '<p class="rl-p">' + esc(body) + '</p>' : '', bodyText: body || line
-        }]);
-        const res = (out && out.results && out.results[0]) || {};
-        if (!res.ok) throw new Error(res.error || 'release rejected');
-        releaseId = firstId = res.id;
-      }
-      await WireSync.publish(releaseId, line, releaseId);
+      const out = await WireSync.inject([{
+        title: line.slice(0, 160), kind: 'paste', source: (company || 'GEN').toUpperCase(), sourceUrl: '',
+        bodyHtml: snapBody(line), bodyText: line
+      }]);
+      const res = (out && out.results && out.results[0]) || {};
+      if (!res.ok) throw new Error(res.error || 'release rejected');
+      await WireSync.publish(res.id, line, res.id);
       const s = await WireSync.loadState();
       applySnapshot(s.releases, s.history, { archives: s.archives, activity: s.activity, embargoes: s.embargoes });
+      if (typeof serverIdToLocal !== 'undefined' && serverIdToLocal.has(res.id)) selectStory(serverIdToLocal.get(res.id));
       toastOut('Published to the wire', 's');
     } catch (e) {
       toastOut('Publish failed: ' + (e.message || 'try again'), 'r');
@@ -148,11 +143,12 @@
   async function open() {
     build();
     $('blankEd').style.display = 'flex';
+    $('btnBlankAE')?.classList.add('on');
     chips(); rows();
     if (window.TemplatesStitch) { await TemplatesStitch.load(); rows(); }
   }
-  function close() { $('blankEd').style.display = 'none'; releaseId = null; }
+  function close() { $('blankEd').style.display = 'none'; $('btnBlankAE')?.classList.remove('on'); }
 
-  document.addEventListener('DOMContentLoaded', () => $('btnBlankAE')?.addEventListener('click', open));
-  if (document.readyState !== 'loading') $('btnBlankAE')?.addEventListener('click', open);
+  const wire = () => $('btnBlankAE')?.addEventListener('click', () => ($('blankEd')?.style.display === 'flex' ? close() : open()));
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', wire); else wire();
 })();

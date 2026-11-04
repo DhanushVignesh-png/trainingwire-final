@@ -85,7 +85,7 @@
       <div class="tb-r">
         <span class="tb-who" id="tbWho"></span>
         <button class="tb-btn ghost" id="btnSignOut" title="End this session and return to the sign-in screen">Sign out</button>
-        <button class="tb-btn" id="btnBlankAE" title="Open an Alert Editor that is not tied to a release — for snapping text sent over Teams or email">Open blank alert editor</button>
+        
         <button class="tb-btn ghost" id="btnSettings">⚙ Settings</button>
       </div>
     </div>
@@ -98,6 +98,7 @@
         <div class="pane-top">
           <div class="tabs">
             <button class="tab on" data-mode="live" title="File snaps off a release">Releases</button>
+            <button class="tab" id="btnBlankAE" title="Open an Alert Editor that is not tied to a release — for text sent over Teams or email">Blank Alert Editor</button>
             <button class="tab" data-mode="correct" title="Refile a chain with a correction">Correction</button>
             <button class="tab" data-mode="withdraw" title="Withdraw a whole chain with an advisory">Withdraw</button>
             <button class="tab" data-float="embargo" title="Build a bundle of snaps to queue or hold — opens a floating panel so the wire stays visible">Embargoes</button>
@@ -389,5 +390,6 @@
   <script src="terminal.js"></script>
   <script src="templates-stitch.js"></script>
 <script src="blank-editor.js"></script>
+<script src="ui-extras.js"></script>
 </body>
 </html>
